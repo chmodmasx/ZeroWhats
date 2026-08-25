@@ -110,7 +110,9 @@ pub fn rename_account(
 ) -> Result<Accounts, String> {
     let path = config_path(&app);
     let mut cfg = Config::load(&path);
-    cfg.accounts.rename(account_id, name).map_err(account_error)?;
+    cfg.accounts
+        .rename(account_id, name)
+        .map_err(account_error)?;
     cfg.save(&path)
         .map_err(|e| format!("failed to save account: {e}"))?;
 
