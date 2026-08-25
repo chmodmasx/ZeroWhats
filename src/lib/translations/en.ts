@@ -12,7 +12,8 @@ export const EN: Strings = {
   renameAccount: "Rename",
   removeAccount: "Remove",
   removeAccountConfirm: "Remove this account and its local WhatsApp session?",
-  primaryAccountHint: "The original account keeps the legacy ZeroWhats profile and cannot be removed yet.",
+  primaryAccountHint:
+    "The original account keeps the legacy ZeroWhats profile and cannot be removed yet.",
   theme: "Theme",
   themeDesc: "Application and WhatsApp appearance",
   themeSystem: "System",
