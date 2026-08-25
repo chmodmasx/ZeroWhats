@@ -3,6 +3,17 @@ import type { Strings } from "./types";
 export const PT_BR: Strings = {
   settingsTitle: "Configurações",
   general: "Geral",
+  accounts: "Contas",
+  accountsDesc: "Gerencie sessões independentes do WhatsApp Web",
+  accountName: "Nome da conta",
+  activeAccount: "Ativa",
+  switchAccount: "Trocar",
+  addAccount: "Adicionar conta",
+  renameAccount: "Renomear",
+  removeAccount: "Remover",
+  removeAccountConfirm: "Remover esta conta e a sessão local do WhatsApp?",
+  primaryAccountHint:
+    "A conta original mantém o perfil legado do ZeroWhats e ainda não pode ser removida.",
   theme: "Tema",
   themeDesc: "Aparência do aplicativo e do WhatsApp",
   themeSystem: "Sistema",
