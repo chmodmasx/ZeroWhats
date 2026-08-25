@@ -61,7 +61,10 @@ pub struct Accounts {
 impl Default for Accounts {
     fn default() -> Self {
         Accounts {
-            items: vec![Account::new(PRIMARY_ACCOUNT_ID, default_name(PRIMARY_ACCOUNT_ID))],
+            items: vec![Account::new(
+                PRIMARY_ACCOUNT_ID,
+                default_name(PRIMARY_ACCOUNT_ID),
+            )],
             active_id: PRIMARY_ACCOUNT_ID,
             next_id: FIRST_DYNAMIC_ACCOUNT_ID,
         }
