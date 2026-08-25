@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use tauri::webview::DownloadEvent;
 use tauri::{AppHandle, Emitter, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
-use crate::accounts::{Account, AccountId, PRIMARY_ACCOUNT_ID};
+use crate::accounts::{Account, AccountId, Accounts, PRIMARY_ACCOUNT_ID};
 use crate::config::{config_path, Config, Theme};
 use crate::{commands, lock, scripts};
 
@@ -140,6 +140,7 @@ fn account_storage_dir(app: &AppHandle, id: AccountId) -> PathBuf {
 
 /// Stable 16-byte WKWebsiteDataStore identifier for macOS 14+. The first twelve
 /// bytes are a ZeroWhats namespace; the final four encode the account id.
+#[cfg(any(target_os = "macos", test))]
 fn account_data_store_identifier(id: AccountId) -> [u8; 16] {
     let mut value = [0u8; 16];
     value[..12].copy_from_slice(b"ZeroWhatsAcc");
@@ -169,8 +170,7 @@ pub fn build_accounts(app: &AppHandle, cfg: &Config) -> tauri::Result<()> {
 }
 
 /// Compatibility helper retained for call sites that still mean "the primary
-/// WhatsApp window". Startup remains on Account 1 until account event routing is
-/// made fully account-aware; [`build_accounts`] is ready for that later step.
+/// WhatsApp window".
 pub fn build_main(app: &AppHandle, cfg: &Config) -> tauri::Result<()> {
     let account = cfg
         .accounts
@@ -333,6 +333,26 @@ fn for_each_account_window(app: &AppHandle, mut f: impl FnMut(AccountId, tauri::
     }
 }
 
+/// Updates account names/active state in every live WhatsApp page and publishes
+/// the authoritative collection for the in-page account switcher. The remote
+/// page never writes this state; it only renders the Rust-owned metadata.
+pub fn sync_account_metadata(app: &AppHandle, accounts: &Accounts) {
+    for account in &accounts.items {
+        let label = account_label(account.id);
+        let Some(window) = app.get_webview_window(&label) else {
+            continue;
+        };
+
+        let name = serde_json::to_string(&account.name)
+            .expect("account name is always JSON serializable");
+        let active = accounts.active_id == account.id;
+        let _ = window.eval(format!(
+            "if (window.__ZW) {{ window.__ZW.accountName = {name}; window.__ZW.isActiveAccount = {active}; }}"
+        ));
+        let _ = window.emit_to(&label, "zw://accounts-state", accounts.clone());
+    }
+}
+
 pub fn sync_has_password(app: &AppHandle, has_password: bool) {
     for_each_account_window(app, |_id, window| {
         let _ = window.eval(format!(
@@ -341,9 +361,7 @@ pub fn sync_has_password(app: &AppHandle, has_password: bool) {
     });
 }
 
-/// Compatibility entry point used by the current single-account window-event
-/// handler. It resolves the persisted active account and delegates to the
-/// label-aware implementation that multi-account events will use later.
+/// Compatibility entry point retained for callers that mean the active account.
 pub fn apply_unfocus_blur(app: &AppHandle, focused: bool) {
     let cfg = Config::load(&config_path(app));
     let label = account_label(cfg.accounts.active_id);
@@ -440,9 +458,9 @@ pub fn show_account(app: &AppHandle, id: AccountId) -> bool {
         }
     }
 
+    sync_account_metadata(app, &cfg.accounts);
     hide_all_accounts(app);
     if let Some(window) = app.get_webview_window(&label) {
-        let _ = window.eval("if (window.__ZW) window.__ZW.isActiveAccount = true;");
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
