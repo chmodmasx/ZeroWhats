@@ -5,65 +5,25 @@
 //! string literals. They are registered as initialization scripts on the WhatsApp
 //! account windows in `window.rs`, in the order below, after [`bootstrap`].
 
-/// Clips the page into a rounded shape so the (transparent) OS window shows
-/// rounded corners. Must run before the in-page titlebar so its `html`
-/// transform is in place when the titlebar's fixed bar is appended.
 pub const ROUNDED_CORNERS: &str = include_str!("web/rounded-corners.js");
-
-/// Hides WhatsApp's recurring "background sync" banner.
 pub const BACKGROUND_SYNC: &str = include_str!("web/background-sync.js");
-
-/// Redirects web notifications to native OS notifications.
 pub const NOTIFICATIONS: &str = include_str!("web/notifications.js");
-
-/// Stubs `navigator.mediaSession` so WebKitGTK never registers an MPRIS media
-/// player for call/voice-note audio (see the file for why there's no engine
-/// setting to disable this instead).
 pub const MPRIS: &str = include_str!("web/mpris.js");
-
-/// Mirrors WhatsApp's unread count onto the tray (`set_unread`).
 pub const UNREAD_BADGE: &str = include_str!("web/unread-badge.js");
-
-/// Captures blob-URL attachment downloads (WebKitGTK's native download
-/// machinery never sees them) and ships the bytes to Rust to write to disk.
 pub const DOWNLOAD: &str = include_str!("web/download.js");
-
-/// Reports in-page mouse/keyboard activity as `zw://activity`, resetting the
-/// auto-lock idle clock that actually lives in Rust (`lock::spawn_watcher`).
 pub const AUTO_LOCK: &str = include_str!("web/auto-lock.js");
-
-/// Exposes `window.__ZW.setBlur` so Rust can blur the page while the window is
-/// unfocused (privacy for screenshots / thumbnails / screen-sharing).
 pub const PRIVACY_BLUR: &str = include_str!("web/privacy-blur.js");
-
-/// The in-page custom titlebar (hamburger menu + window controls).
 pub const TITLEBAR: &str = include_str!("web/titlebar.js");
-
-/// Edge/corner resize grips for the frameless (undecorated) main window.
 pub const RESIZE_HANDLES: &str = include_str!("web/resize-handles.js");
-
-/// Bridges clipboard-image paste (WebKitGTK can't hand images to the page).
 pub const CLIPBOARD_IMAGE: &str = include_str!("web/clipboard-image.js");
-
-/// Routes external links (clicks / window.open) to the system browser.
 pub const LINKS: &str = include_str!("web/links.js");
-
-/// Find-in-page overlay (Ctrl/Cmd+F).
 pub const FIND: &str = include_str!("web/find.js");
-
-/// Bridges the HTML5 Fullscreen API to the native window.
 pub const FULLSCREEN: &str = include_str!("web/fullscreen.js");
-
-/// Logs WhatsApp out and wipes its storage. Eval'd on demand (not an init
-/// script) by the non-Linux "forgot password" recovery.
 pub const WIPE_SESSION: &str = include_str!("web/wipe-session.js");
-
-/// Injected in minimal mode to disable WebRTC/media APIs that can inflate the
-/// WebKit process memory footprint.
 pub const DISABLE_MEDIA: &str = include_str!("web/disable-media.js");
 
 /// The first script to run: seeds `window.__ZW` with global settings plus the
-/// stable account identity the other scripts can attach to their events.
+/// immutable account identity the other scripts attach to their events.
 pub fn bootstrap(
     wa_theme: &str,
     auto_lock_minutes: u32,
@@ -71,7 +31,6 @@ pub fn bootstrap(
     spellcheck: bool,
     account_id: u32,
     account_name: &str,
-    is_active_account: bool,
 ) -> String {
     let account_name =
         serde_json::to_string(account_name).expect("account name is always JSON serializable");
@@ -86,16 +45,9 @@ pub fn bootstrap(
         .replace("\"__ZW_SPELLCHECK__\"", &spellcheck.to_string())
         .replace("\"__ZW_ACCOUNT_ID__\"", &account_id.to_string())
         .replace("\"__ZW_ACCOUNT_NAME__\"", &account_name)
-        .replace(
-            "\"__ZW_IS_ACTIVE_ACCOUNT__\"",
-            &is_active_account.to_string(),
-        )
 }
 
-/// Forces `spellcheck=true` on WhatsApp's composer when enabled.
 pub const SPELLCHECK: &str = include_str!("web/spellcheck.js");
-
-/// Shows a banner when a new version is available (background check).
 pub const UPDATE_BANNER: &str = include_str!("web/update-banner.js");
 
 #[cfg(test)]
@@ -103,7 +55,7 @@ mod tests {
     use super::*;
 
     fn sample_bootstrap() -> String {
-        bootstrap("dark", 15, true, true, 2, "Work", true)
+        bootstrap("dark", 15, true, true, 2, "Work")
     }
 
     #[test]
@@ -129,18 +81,16 @@ mod tests {
 
     #[test]
     fn bootstrap_substitutes_spellcheck() {
-        let script = bootstrap("system", 0, false, false, 1, "Personal", false);
+        let script = bootstrap("system", 0, false, false, 1, "Personal");
         assert!(!script.contains("__ZW_SPELLCHECK__"));
     }
 
     #[test]
     fn bootstrap_substitutes_account_identity() {
-        let script = bootstrap("system", 0, false, true, 7, "Work \"QA\"", false);
+        let script = bootstrap("system", 0, false, true, 7, "Work \"QA\"");
         assert!(script.contains("accountId: 7"));
         assert!(script.contains("accountName: \"Work \\\"QA\\\"\""));
-        assert!(script.contains("isActiveAccount: false"));
         assert!(!script.contains("__ZW_ACCOUNT_"));
-        assert!(!script.contains("__ZW_IS_ACTIVE_ACCOUNT__"));
     }
 
     #[test]
