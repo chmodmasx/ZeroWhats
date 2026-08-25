@@ -1,4 +1,4 @@
-//! Window creation and management: the single WhatsApp window (with the page
+//! Window creation and management: account-scoped WhatsApp windows (with page
 //! scripts injected and a navigation allow-list) and the frameless React windows
 //! (Settings / About / Shortcuts).
 
@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use tauri::webview::DownloadEvent;
 use tauri::{AppHandle, Emitter, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
+use crate::accounts::{Account, AccountId, PRIMARY_ACCOUNT_ID};
 use crate::config::{config_path, Config, Theme};
 use crate::{commands, lock, scripts};
 
@@ -84,13 +85,7 @@ fn target_for_name(app: &AppHandle, name: &str) -> PathBuf {
 }
 
 /// Writes bytes captured from a page-side blob download (see `web/download.js`)
-/// to the configured downloads folder. WhatsApp Web's attachment "download"
-/// button saves via a `blob:` URL + synthetic `<a download>` click, which never
-/// reaches WebKitGTK's own download machinery — that only sees real
-/// network-navigated downloads (e.g. a `Content-Disposition: attachment`
-/// response), not in-page blobs. So the page-injected script reads the blob
-/// itself and ships the bytes here over the same `zw://` event bridge used
-/// elsewhere, and this writes them directly instead of relying on `on_download`.
+/// to the configured downloads folder.
 pub fn save_download_bytes(app: &AppHandle, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
     let target = target_for_name(app, name);
     std::fs::write(&target, bytes)?;
@@ -98,80 +93,122 @@ pub fn save_download_bytes(app: &AppHandle, name: &str, bytes: &[u8]) -> std::io
 }
 
 /// Fully transparent: these windows are `.transparent(true)` for rounded
-/// corners, and the React screen's own CSS already paints the themed
-/// background the instant it loads (no flash to guard against) — a non-zero
-/// alpha here would paint a square behind the CSS-rounded shape, undoing it.
+/// corners, and the React screen's own CSS already paints the themed background.
 pub fn transparent_bg() -> tauri::window::Color {
     tauri::window::Color(0, 0, 0, 0)
 }
 
-/// Label of the webview hosting WhatsApp Web. Its titlebar is injected into the
-/// page (see `web/titlebar.js`) rather than stacking a second webview.
+/// Historical label of Account 1. Keeping it unchanged is part of the migration
+/// contract: the pre-multi-account window and its WebKit profile stay intact.
 pub const MAIN_LABEL: &str = "main";
-
+const ACCOUNT_LABEL_PREFIX: &str = "account-";
 const WHATSAPP_URL: &str = "https://web.whatsapp.com";
-// Default desktop UA so WhatsApp Web serves the full desktop client. We
-// allow switching to a lighter (mobile) UA at runtime by setting the
-// `ZW_LIGHT_UA` environment variable when launching the app. This is a
-// quick way to test whether a lighter frontend reduces the WebKit process
-// memory footprint.
+
+/// Stable window label for an account. Account 1 keeps `main`; newer accounts use
+/// `account-N`, which also matches the restricted remote capability glob.
+pub fn account_label(id: AccountId) -> String {
+    if id == PRIMARY_ACCOUNT_ID {
+        MAIN_LABEL.to_string()
+    } else {
+        format!("{ACCOUNT_LABEL_PREFIX}{id}")
+    }
+}
+
+/// Reverse mapping used by the global window-event handler to distinguish
+/// WhatsApp windows from local React windows.
+pub fn account_id_from_label(label: &str) -> Option<AccountId> {
+    if label == MAIN_LABEL {
+        return Some(PRIMARY_ACCOUNT_ID);
+    }
+
+    label
+        .strip_prefix(ACCOUNT_LABEL_PREFIX)
+        .and_then(|id| id.parse::<AccountId>().ok())
+        .filter(|id| *id != PRIMARY_ACCOUNT_ID && *id != 0)
+}
+
+/// Dedicated persistent browser data for non-legacy accounts. Account 1 never
+/// calls this path: omitting `data_directory` is how its existing session stays
+/// exactly where old ZeroWhats versions left it.
+fn account_storage_dir(app: &AppHandle, id: AccountId) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .expect("app data dir resolvable")
+        .join("accounts")
+        .join(id.to_string())
+}
+
+/// Stable 16-byte WKWebsiteDataStore identifier for macOS 14+. The first twelve
+/// bytes are a ZeroWhats namespace; the final four encode the account id.
+fn account_data_store_identifier(id: AccountId) -> [u8; 16] {
+    let mut value = [0u8; 16];
+    value[..12].copy_from_slice(b"ZeroWhatsAcc");
+    value[12..].copy_from_slice(&id.to_be_bytes());
+    value
+}
+
 fn chosen_user_agent() -> &'static str {
     if std::env::var("ZW_LIGHT_UA").is_ok() {
-        // Mobile UA (smaller surface area in many web apps).
         "Mozilla/5.0 (Linux; Android 12; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
     } else if std::env::var("ZW_CHROME_UA").is_ok() {
-        // The old spoof: Chrome-on-Windows. WhatsApp Web then serves its Blink
-        // code path, which WebKitGTK renders imperfectly — notably stickers and
-        // some emoji fail. Kept behind an env var for A/B testing only.
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     } else {
-        // Safari on macOS. Since the runtime engine *is* WebKit, advertising a
-        // real WebKit browser makes WhatsApp Web serve the Safari/WebKit code
-        // path — the one it actually tests against for WebKit — which fixes
-        // sticker (animated WebP) and emoji rendering that broke under the
-        // Chrome spoof above.
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15"
     }
 }
 
-/// Builds the single frameless WhatsApp window with the page scripts injected.
-/// One webview means input works on every platform (unlike a stacked second
-/// webview on Linux).
+/// Builds every persisted WhatsApp account. Each account is a separate native
+/// window/WebView instead of stacking WebViews, preserving the input behaviour
+/// the original client intentionally relies on. Only the active account reveals
+/// itself on startup; the others stay loaded in the background.
+pub fn build_accounts(app: &AppHandle, cfg: &Config) -> tauri::Result<()> {
+    for account in &cfg.accounts.items {
+        build_account(app, cfg, account)?;
+    }
+    Ok(())
+}
+
+/// Compatibility helper retained for call sites/tests that still mean "the
+/// primary WhatsApp window". New startup code should use [`build_accounts`].
 pub fn build_main(app: &AppHandle, cfg: &Config) -> tauri::Result<()> {
+    let account = cfg
+        .accounts
+        .get(PRIMARY_ACCOUNT_ID)
+        .unwrap_or_else(|| cfg.accounts.active());
+    build_account(app, cfg, account)
+}
+
+/// Builds one frameless WhatsApp window with an isolated browser profile when it
+/// is not the legacy Account 1.
+pub fn build_account(app: &AppHandle, cfg: &Config, account: &Account) -> tauri::Result<()> {
+    let label = account_label(account.id);
+    if app.get_webview_window(&label).is_some() {
+        return Ok(());
+    }
+
     let start_locked = cfg.password_hash.is_some();
     let auto_lock_minutes = lock::effective_auto_lock_minutes(cfg);
+    let is_active = cfg.accounts.active_id == account.id;
     let nav_app = app.clone();
     let dl_app = app.clone();
+    let download_label = label.clone();
 
     let minimal = std::env::var("ZW_MINIMAL").is_ok();
     let force_show = std::env::var("ZW_FORCE_SHOW").is_ok();
 
     let mut builder = WebviewWindowBuilder::new(
         app,
-        MAIN_LABEL,
+        label.clone(),
         WebviewUrl::External(WHATSAPP_URL.parse().unwrap()),
     )
     .title("ZeroWhats")
     .inner_size(1100.0, 800.0)
     .decorations(false)
     .transparent(true)
-    // No `.shadow(true)`: the compositor draws that shadow as a plain
-    // rectangle around the window's bounds — it has no idea the content
-    // inside is rounded — so it shows up as a square edge around the rounded
-    // shape. The CSS `box-shadow` in `web/rounded-corners.js` replaces it,
-    // since it's painted as part of the page's own rounded box.
     .background_color(transparent_bg())
-    // Always created hidden: a transparent+rounded window shown before its
-    // first composited frame can get stuck rendering opaque on some Linux
-    // compositors (the alpha visual isn't picked up until a frame actually
-    // paints). `web/rounded-corners.js` reveals it on the next macrotask
-    // once the rounding stylesheet is in place — unless a password is set,
-    // in which case the lock screen reveals it later instead.
-    .visible(force_show)
-    .user_agent(&chosen_user_agent())
+    .visible(force_show && is_active)
+    .user_agent(chosen_user_agent())
     .on_navigation(move |url| allow_navigation(&nav_app, url))
-    // WhatsApp triggers its own downloads (blob/anchor); route them to the
-    // configured folder so they actually save.
     .on_download(move |webview, event| {
         match event {
             DownloadEvent::Requested { url, destination } => {
@@ -189,7 +226,7 @@ pub fn build_main(app: &AppHandle, cfg: &Config) -> tauri::Result<()> {
                     .map(|n| n.to_string_lossy().into_owned());
                 let path_str = path.as_ref().map(|p| p.to_string_lossy().into_owned());
                 let _ = webview.emit_to(
-                    MAIN_LABEL,
+                    &download_label,
                     "zw://download-result",
                     serde_json::json!({ "ok": success, "name": name, "path": path_str }),
                 );
@@ -199,26 +236,37 @@ pub fn build_main(app: &AppHandle, cfg: &Config) -> tauri::Result<()> {
         true
     });
 
+    if !account.uses_legacy_storage() {
+        #[cfg(target_os = "macos")]
+        {
+            builder = builder.data_store_identifier(account_data_store_identifier(account.id));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            builder = builder.data_directory(account_storage_dir(app, account.id));
+        }
+    }
+
     builder = builder.initialization_script(scripts::bootstrap(
         cfg.theme.wa_value(),
         auto_lock_minutes,
         start_locked,
         cfg.spellcheck_enabled,
+        account.id,
+        &account.name,
+        is_active,
     ));
 
     builder = builder.initialization_script(scripts::ROUNDED_CORNERS);
 
     if !minimal {
-        // These add background work (sync, notifications, badges) — skip in
-        // minimal mode to reduce memory/CPU usage when testing.
         builder = builder.initialization_script(scripts::BACKGROUND_SYNC);
         builder = builder.initialization_script(scripts::NOTIFICATIONS);
         builder = builder.initialization_script(scripts::UNREAD_BADGE);
     }
 
     if minimal {
-        // Inject a script that disables WebRTC/media APIs to avoid the web
-        // engine loading codec/gstreamer subsystems.
         builder = builder.initialization_script(scripts::DISABLE_MEDIA);
     }
 
@@ -236,19 +284,20 @@ pub fn build_main(app: &AppHandle, cfg: &Config) -> tauri::Result<()> {
         .initialization_script(scripts::SPELLCHECK)
         .initialization_script(scripts::UPDATE_BANNER);
 
-    // Finish building the window; `.build()` returns the created WebviewWindow.
     let _ = builder.build()?;
     log::info!(
-        "built main window (label={}) minimal={}",
-        MAIN_LABEL,
+        "built account window (id={} label={} active={} legacy_storage={} minimal={})",
+        account.id,
+        label,
+        is_active,
+        account.uses_legacy_storage(),
         minimal
     );
     Ok(())
 }
 
 /// Navigation allow-list (security): only WhatsApp may load inside the app
-/// window. Any other http(s) destination — a shared link, an ad — is blocked and
-/// opened in the user's real browser instead.
+/// window. Any other http(s) destination is opened in the user's real browser.
 fn allow_navigation(app: &AppHandle, url: &Url) -> bool {
     if is_whatsapp_url(url) {
         return true;
@@ -261,8 +310,6 @@ fn allow_navigation(app: &AppHandle, url: &Url) -> bool {
     false
 }
 
-/// Whether `url` belongs to WhatsApp (or is an in-page pseudo-scheme). Media is
-/// loaded from `*.whatsapp.net`, so those hosts are allowed too.
 fn is_whatsapp_url(url: &Url) -> bool {
     if matches!(url.scheme(), "about" | "blob" | "data") {
         return true;
@@ -274,102 +321,145 @@ fn is_whatsapp_url(url: &Url) -> bool {
             || host.ends_with(".whatsapp.net"))
 }
 
-/// Updates `window.__ZW.hasPassword` live so the injected titlebar shows/hides
-/// the Lock menu item without a reload (the tray is refreshed separately).
-pub fn sync_has_password(app: &AppHandle, has_password: bool) {
-    if let Some(main) = app.get_webview_window(MAIN_LABEL) {
-        let _ = main.eval(format!(
-            "if (window.__ZW) window.__ZW.hasPassword = {has_password};"
-        ));
+/// Runs `f` for every currently-created WhatsApp account window.
+fn for_each_account_window(app: &AppHandle, mut f: impl FnMut(AccountId, tauri::WebviewWindow)) {
+    let cfg = Config::load(&config_path(app));
+    for account in &cfg.accounts.items {
+        let label = account_label(account.id);
+        if let Some(window) = app.get_webview_window(&label) {
+            f(account.id, window);
+        }
     }
 }
 
-/// Blurs (or clears) the WhatsApp page for privacy when the main window loses
-/// focus. Reads the live `hide_content_on_unfocus` setting, so disabling it takes
-/// effect immediately. A `focused` window is always cleared regardless of the
-/// setting (nothing to hide while it's on top).
-pub fn apply_unfocus_blur(app: &AppHandle, focused: bool) {
+pub fn sync_has_password(app: &AppHandle, has_password: bool) {
+    for_each_account_window(app, |_id, window| {
+        let _ = window.eval(format!(
+            "if (window.__ZW) window.__ZW.hasPassword = {has_password};"
+        ));
+    });
+}
+
+/// Blurs or clears one account page when that account window changes focus.
+pub fn apply_unfocus_blur(app: &AppHandle, label: &str, focused: bool) {
     let cfg = Config::load(&config_path(app));
     let blur = !focused && cfg.hide_content_on_unfocus;
 
-    log::debug!("apply_unfocus_blur: focused={focused} blur={blur}");
+    log::debug!("apply_unfocus_blur: label={label} focused={focused} blur={blur}");
 
-    if let Some(main) = app.get_webview_window(MAIN_LABEL) {
-        let _ = main.eval(format!(
+    if let Some(window) = app.get_webview_window(label) {
+        let _ = window.eval(format!(
             "if (window.__ZW && window.__ZW.setBlur) window.__ZW.setBlur({blur});"
         ));
     }
 }
 
-/// Pushes the WhatsApp theme into the page and reloads so it takes effect.
+/// Pushes the WhatsApp theme into every account page and reloads each so it takes
+/// effect consistently across active and background sessions.
 pub fn apply_theme(app: &AppHandle, theme: Theme) {
-    if let Some(main) = app.get_webview_window(MAIN_LABEL) {
-        let wa = theme.wa_value();
-
-        let _ = main.eval(format!(
+    let wa = theme.wa_value();
+    for_each_account_window(app, |_id, window| {
+        let _ = window.eval(format!(
             "(function(){{ try {{ localStorage.setItem('theme', '\"{wa}\"'); location.reload(); }} catch (e) {{}} }})();"
         ));
-    }
+    });
 }
 
-/// Applies the spell-check settings to the main WhatsApp webview. On Linux we
-/// reach the underlying `WebKitWebView`'s context and toggle enchant spell
-/// checking (with the chosen dictionaries, or auto-detected when the list is
-/// empty). No-op on other platforms for now — WebView2/WKWebView spell check
-/// their editable fields by default.
+/// Applies spell-check settings to every account WebView.
 pub fn apply_spellcheck(app: &AppHandle, enabled: bool, languages: Vec<String>) {
-    let Some(main) = app.get_webview_window(MAIN_LABEL) else {
-        return;
-    };
-
     #[cfg(target_os = "linux")]
     {
         use webkit2gtk::{WebContextExt, WebViewExt};
 
-        let _ = main.with_webview(move |webview| {
-            let wv = webview.inner();
-
-            // enchant spell checking lives on the shared WebContext.
-            if let Some(ctx) = wv.context() {
-                ctx.set_spell_checking_enabled(enabled);
-                if enabled && !languages.is_empty() {
-                    let langs: Vec<&str> = languages.iter().map(String::as_str).collect();
-                    ctx.set_spell_checking_languages(&langs);
+        for_each_account_window(app, |_id, window| {
+            let languages = languages.clone();
+            let _ = window.with_webview(move |webview| {
+                let wv = webview.inner();
+                if let Some(ctx) = wv.context() {
+                    ctx.set_spell_checking_enabled(enabled);
+                    if enabled && !languages.is_empty() {
+                        let langs: Vec<&str> = languages.iter().map(String::as_str).collect();
+                        ctx.set_spell_checking_languages(&langs);
+                    }
                 }
-            }
+            });
         });
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (enabled, languages);
+        let _ = (app, enabled, languages);
     }
 }
 
-/// Reveals the main window (or the lock screen if locked).
+/// Hides every WhatsApp account window. Used by the global app lock and while
+/// switching accounts so only one account is presented at a time.
+pub fn hide_all_accounts(app: &AppHandle) {
+    for_each_account_window(app, |_id, window| {
+        let _ = window.hide();
+    });
+}
+
+/// Reveals one persisted account, creating its WebView lazily if necessary.
+/// Returns false for an unknown account or if building the WebView fails.
+pub fn show_account(app: &AppHandle, id: AccountId) -> bool {
+    if lock::is_locked() {
+        lock::show_lock_window(app);
+        return false;
+    }
+
+    let path = config_path(app);
+    let mut cfg = Config::load(&path);
+    let Some(account) = cfg.accounts.get(id).cloned() else {
+        log::warn!("show_account: unknown account id {id}");
+        return false;
+    };
+
+    if cfg.accounts.set_active(id).is_err() {
+        return false;
+    }
+    if let Err(e) = cfg.save(&path) {
+        log::warn!("show_account: failed to persist active account {id}: {e}");
+    }
+
+    let label = account_label(id);
+    if app.get_webview_window(&label).is_none() {
+        if let Err(e) = build_account(app, &cfg, &account) {
+            log::error!("show_account: failed to build account {id}: {e}");
+            return false;
+        }
+    }
+
+    hide_all_accounts(app);
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = window.eval("if (window.__ZW) window.__ZW.isActiveAccount = true;");
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        true
+    } else {
+        false
+    }
+}
+
+/// Reveals the persisted active account (or the lock screen if locked).
 pub fn show_main(app: &AppHandle) {
     if lock::is_locked() {
         lock::show_lock_window(app);
         return;
     }
 
-    log::info!("show_main() called");
-    if let Some(main) = app.get_webview_window(MAIN_LABEL) {
-        log::info!("show_main: found main webview, unminimizing and showing");
-        let _ = main.unminimize();
-        let _ = main.show();
-        let _ = main.set_focus();
-    } else {
-        log::warn!("show_main: main webview not found");
+    let cfg = Config::load(&config_path(app));
+    let id = cfg.accounts.active_id;
+    log::info!("show_main: active account id={id}");
+    if !show_account(app, id) {
+        log::warn!("show_main: active account {id} could not be shown");
     }
 }
 
 /// Opens (or focuses) a frameless React window that renders the screen matching
 /// its label.
 fn open_react_window(app: &AppHandle, label: &str, title: &str, size: (f64, f64), resizable: bool) {
-    // While locked, the auxiliary windows (settings/about/shortcuts) must stay
-    // shut — they expose config and the password controls. Redirect to the lock
-    // screen instead so the tray/menu entries can't bypass the lock.
     if lock::is_locked() {
         lock::show_lock_window(app);
         return;
@@ -387,9 +477,6 @@ fn open_react_window(app: &AppHandle, label: &str, title: &str, size: (f64, f64)
         title
     );
 
-    // Created hidden; the React screen calls `show()` once it has painted, so the
-    // window appears fully rendered instead of flashing white → background →
-    // content (see src/lib/window.ts `revealWindow`).
     let result = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title(title)
         .inner_size(size.0, size.1)
@@ -398,9 +485,6 @@ fn open_react_window(app: &AppHandle, label: &str, title: &str, size: (f64, f64)
         .center()
         .decorations(false)
         .transparent(true)
-        // No `.shadow(true)`: see the comment on `build_main` — the compositor's
-        // shadow is a plain rectangle and shows up as a square edge around the
-        // CSS-rounded `.window`, which already has its own `box-shadow`.
         .visible(false)
         .background_color(transparent_bg())
         .build();
@@ -431,7 +515,31 @@ pub fn open_update(app: &AppHandle) {
 mod tests {
     use super::*;
 
-    // --- is_whatsapp_url ---
+    #[test]
+    fn primary_account_uses_main_label() {
+        assert_eq!(account_label(PRIMARY_ACCOUNT_ID), MAIN_LABEL);
+        assert_eq!(account_id_from_label(MAIN_LABEL), Some(PRIMARY_ACCOUNT_ID));
+    }
+
+    #[test]
+    fn additional_accounts_use_prefixed_labels() {
+        assert_eq!(account_label(2), "account-2");
+        assert_eq!(account_id_from_label("account-2"), Some(2));
+        assert_eq!(account_id_from_label("account-42"), Some(42));
+    }
+
+    #[test]
+    fn invalid_account_labels_are_rejected() {
+        for label in ["account-0", "account-1", "account-", "account-x", "settings"] {
+            assert_eq!(account_id_from_label(label), None);
+        }
+    }
+
+    #[test]
+    fn data_store_ids_are_stable_and_distinct() {
+        assert_eq!(account_data_store_identifier(2), account_data_store_identifier(2));
+        assert_ne!(account_data_store_identifier(2), account_data_store_identifier(3));
+    }
 
     #[test]
     fn whatsapp_main_url() {
@@ -492,8 +600,6 @@ mod tests {
         let url: Url = "https://evil.com/whatsapp.com".parse().unwrap();
         assert!(!is_whatsapp_url(&url));
     }
-
-    // --- unique_path ---
 
     #[test]
     fn unique_path_no_conflict() {
