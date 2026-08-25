@@ -33,6 +33,12 @@ impl Account {
         account
     }
 
+    /// Account 1 deliberately keeps the legacy WebKit profile. This is the
+    /// migration guarantee that preserves an already-linked WhatsApp session.
+    pub fn uses_legacy_storage(&self) -> bool {
+        self.id == PRIMARY_ACCOUNT_ID
+    }
+
     fn normalize_name(&mut self) {
         self.name = self.name.trim().to_string();
         if self.name.is_empty() {
@@ -63,6 +69,13 @@ impl Default for Accounts {
 }
 
 impl Accounts {
+    pub fn active(&self) -> &Account {
+        self.items
+            .iter()
+            .find(|account| account.id == self.active_id)
+            .unwrap_or_else(|| self.items.first().expect("accounts are normalized"))
+    }
+
     /// Repairs user-edited / partially migrated config without ever touching
     /// WebKit profile data. The first valid occurrence of an id wins; invalid
     /// zero/duplicate ids are discarded, an empty list becomes legacy Account 1,
@@ -112,6 +125,7 @@ mod tests {
         assert_eq!(accounts.items[0].name, "Account 1");
         assert_eq!(accounts.active_id, PRIMARY_ACCOUNT_ID);
         assert_eq!(accounts.next_id, 2);
+        assert!(accounts.active().uses_legacy_storage());
     }
 
     #[test]
