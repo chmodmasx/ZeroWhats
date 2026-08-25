@@ -1,6 +1,8 @@
 use serde::Serialize;
 use tauri::{Emitter, Manager};
 
+use crate::config::{config_path, Config};
+
 const RELEASES_URL: &str = "https://api.github.com/repos/ZauJulio/ZeroWhats/releases/latest";
 
 #[derive(Clone, Serialize, serde::Deserialize)]
@@ -134,8 +136,16 @@ pub fn start_background_check(app: &tauri::AppHandle) {
             let version = handle.config().version.clone().unwrap_or_default();
             if let Some(info) = check_update(&version) {
                 log::info!("update available: {}", info.tag_name);
-                if let Some(main) = handle.get_webview_window(crate::window::MAIN_LABEL) {
-                    let _ = main.emit_to(crate::window::MAIN_LABEL, "zw://update-available", &info);
+
+                // Every account page owns its own in-page update banner. Publish
+                // the same app-wide release info to all live account windows so a
+                // later account switch cannot hide an update discovered earlier.
+                let cfg = Config::load(&config_path(&handle));
+                for account in &cfg.accounts.items {
+                    let label = crate::window::account_label(account.id);
+                    if let Some(window) = handle.get_webview_window(&label) {
+                        let _ = window.emit_to(&label, "zw://update-available", &info);
+                    }
                 }
             }
             std::thread::sleep(std::time::Duration::from_secs(7 * 24 * 3600));
