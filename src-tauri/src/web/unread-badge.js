@@ -1,12 +1,13 @@
-// Mirrors WhatsApp's unread count onto the system tray.
+// Mirrors this WhatsApp account's unread count onto the system tray.
 //
 // WhatsApp keeps the total in `document.title` (e.g. "(3) WhatsApp"), so we
-// watch the <title> node and forward the number to the `set_unread` command,
-// which draws the badge onto the tray icon. 0 clears it.
+// watch the <title> node and forward the number together with the stable account
+// id. Rust aggregates every account before drawing the single tray badge.
 (() => {
   "use strict";
 
   const tauri = window.__TAURI__;
+  const accountId = window.__ZW?.accountId;
 
   const readCount = () => {
     const match = (document.title || "").match(/\((\d+)\)/);
@@ -22,7 +23,7 @@
     // App commands are blocked from this remote origin, so the count is sent as
     // an event the Rust side listens for (event emit is a core command).
     try {
-      tauri?.event?.emit("zw://unread", { count });
+      tauri?.event?.emit("zw://unread", { accountId, count });
     } catch (e) {
       console.error("[ZeroWhats] emit unread failed", e);
     }
