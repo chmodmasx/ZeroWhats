@@ -17,6 +17,7 @@ import {
 import { applyTheme } from "../../lib/theme";
 import { useReveal } from "../../lib/window";
 import { t } from "../../lib/translations";
+import AccountsPanel from "./AccountsPanel";
 import styles from "./Settings.module.css";
 
 // Common enchant dictionary codes offered as spell-check toggles. Which ones
@@ -33,7 +34,7 @@ const SPELLCHECK_DICTS: { code: string; label: string }[] = [
   { code: "it_IT", label: "Italiano" },
 ];
 
-type Tab = "general" | "security" | "notifications" | "advanced";
+type Tab = "general" | "accounts" | "security" | "notifications" | "advanced";
 
 export default function Settings() {
   const [cfg, setCfg] = useState<ConfigView | null>(null);
@@ -110,6 +111,7 @@ export default function Settings() {
 
   const TABS: { id: Tab; label: string }[] = [
     { id: "general", label: t.general },
+    { id: "accounts", label: t.accounts },
     { id: "security", label: t.security },
     { id: "notifications", label: t.notifications },
     { id: "advanced", label: t.advanced },
@@ -207,6 +209,8 @@ export default function Settings() {
           </Group>
         </>
       )}
+
+      {tab === "accounts" && <AccountsPanel />}
 
       {tab === "security" && (
         <Group title={t.security}>
