@@ -104,6 +104,36 @@ pub const MAIN_LABEL: &str = "main";
 const ACCOUNT_LABEL_PREFIX: &str = "account-";
 const WHATSAPP_URL: &str = "https://web.whatsapp.com";
 
+/// Geometry copied between account windows so switching sessions feels like one
+/// logical native window instead of opening a different window at another size.
+#[derive(Debug, Clone, Copy)]
+struct SwitchGeometry {
+    position: tauri::PhysicalPosition<i32>,
+    size: tauri::PhysicalSize<u32>,
+    maximized: bool,
+}
+
+fn capture_switch_geometry(window: &tauri::WebviewWindow) -> Option<SwitchGeometry> {
+    Some(SwitchGeometry {
+        position: window.outer_position().ok()?,
+        size: window.inner_size().ok()?,
+        maximized: window.is_maximized().unwrap_or(false),
+    })
+}
+
+fn apply_switch_geometry(window: &tauri::WebviewWindow, geometry: SwitchGeometry) {
+    // Move a maximized target onto the source monitor before maximizing it. We
+    // intentionally do not copy the maximized physical size as its restore size;
+    // for normal windows both position and inner size are copied exactly.
+    let _ = window.unmaximize();
+    let _ = window.set_position(geometry.position);
+    if geometry.maximized {
+        let _ = window.maximize();
+    } else {
+        let _ = window.set_size(geometry.size);
+    }
+}
+
 /// Stable window label for an account. Account 1 keeps `main`; newer accounts use
 /// `account-N`, which also matches the restricted remote capability glob.
 pub fn account_label(id: AccountId) -> String {
@@ -443,6 +473,15 @@ pub fn show_account(app: &AppHandle, id: AccountId) -> bool {
         return false;
     };
 
+    let previous_active = cfg.accounts.active_id;
+    let switch_geometry = if previous_active != id {
+        let previous_label = account_label(previous_active);
+        app.get_webview_window(&previous_label)
+            .and_then(|window| capture_switch_geometry(&window))
+    } else {
+        None
+    };
+
     if cfg.accounts.set_active(id).is_err() {
         return false;
     }
@@ -461,6 +500,9 @@ pub fn show_account(app: &AppHandle, id: AccountId) -> bool {
     sync_account_metadata(app, &cfg.accounts);
     hide_all_accounts(app);
     if let Some(window) = app.get_webview_window(&label) {
+        if let Some(geometry) = switch_geometry {
+            apply_switch_geometry(&window, geometry);
+        }
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
