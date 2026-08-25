@@ -66,6 +66,7 @@ fn main() {
             commands::add_account,
             commands::switch_account,
             commands::rename_account,
+            commands::remove_account,
             commands::set_password,
             commands::remove_password,
             commands::reset_password,
