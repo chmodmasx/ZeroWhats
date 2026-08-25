@@ -10,11 +10,13 @@
 
   if (window.__zwClipImage) return;
   const tauri = window.__TAURI__;
+  const accountId = window.__ZW?.accountId;
   if (!tauri?.event) return;
   window.__zwClipImage = true;
 
-  // Single-flight request/response over the zw:// event pair. Rust always
-  // answers (empty array = nothing), so the promise never dangles.
+  // Single-flight request/response over the zw:// event pair. Rust targets its
+  // response to this account window only, so two linked accounts cannot consume
+  // each other's clipboard reply.
   let pending = null;
   tauri.event.listen("zw://paste-image-data", (event) => {
     const resolve = pending;
@@ -25,7 +27,7 @@
   const requestClipboardFiles = () =>
     new Promise((resolve) => {
       pending = resolve;
-      tauri.event.emit("zw://paste-image-request");
+      tauri.event.emit("zw://paste-image-request", { accountId });
       // Safety net: if Rust never answers, don't wedge paste forever.
       setTimeout(() => {
         if (pending === resolve) {
