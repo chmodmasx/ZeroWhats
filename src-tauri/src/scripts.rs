@@ -24,6 +24,11 @@ pub const DISABLE_MEDIA: &str = include_str!("web/disable-media.js");
 
 /// The first script to run: seeds `window.__ZW` with global settings plus the
 /// immutable account identity the other scripts attach to their events.
+///
+/// `_is_active_account` remains in the builder-facing signature while the window
+/// refactor is staged, but visibility is deliberately no longer embedded in an
+/// initialization script: `zw://account-ready` lets Rust consult live state on
+/// every page load instead, so account switches cannot become stale after reload.
 pub fn bootstrap(
     wa_theme: &str,
     auto_lock_minutes: u32,
@@ -31,6 +36,7 @@ pub fn bootstrap(
     spellcheck: bool,
     account_id: u32,
     account_name: &str,
+    _is_active_account: bool,
 ) -> String {
     let account_name =
         serde_json::to_string(account_name).expect("account name is always JSON serializable");
@@ -55,7 +61,7 @@ mod tests {
     use super::*;
 
     fn sample_bootstrap() -> String {
-        bootstrap("dark", 15, true, true, 2, "Work")
+        bootstrap("dark", 15, true, true, 2, "Work", true)
     }
 
     #[test]
@@ -81,13 +87,13 @@ mod tests {
 
     #[test]
     fn bootstrap_substitutes_spellcheck() {
-        let script = bootstrap("system", 0, false, false, 1, "Personal");
+        let script = bootstrap("system", 0, false, false, 1, "Personal", false);
         assert!(!script.contains("__ZW_SPELLCHECK__"));
     }
 
     #[test]
     fn bootstrap_substitutes_account_identity() {
-        let script = bootstrap("system", 0, false, true, 7, "Work \"QA\"");
+        let script = bootstrap("system", 0, false, true, 7, "Work \"QA\"", false);
         assert!(script.contains("accountId: 7"));
         assert!(script.contains("accountName: \"Work \\\"QA\\\"\""));
         assert!(!script.contains("__ZW_ACCOUNT_"));
