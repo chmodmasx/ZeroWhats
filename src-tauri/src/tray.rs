@@ -148,7 +148,7 @@ fn menu_icon(glyph: &[&str; 16]) -> Image<'static> {
 
     let (r, g, b) = (0x8a, 0x8a, 0x8a);
     let mut px = vec![0u8; N * N * 4];
-    
+
     for (y, row) in glyph.iter().enumerate() {
         for (x, ch) in row.chars().take(N).enumerate() {
             if ch == '#' {
@@ -288,13 +288,20 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             } = event
             {
                 let app = tray.app_handle();
+                let cfg = Config::load(&config_path(app));
+                let label = window::account_label(cfg.accounts.active_id);
 
-                if let Some(main) = app.get_webview_window(window::MAIN_LABEL) {
-                    if main.is_visible().unwrap_or(false) && !lock::is_locked() {
-                        let _ = main.hide();
+                // The tray represents the application, not Account 1. Toggle
+                // whichever account is currently selected; falling back to
+                // `show_main` also covers a lazily-created/missing WebView.
+                if let Some(active) = app.get_webview_window(&label) {
+                    if active.is_visible().unwrap_or(false) && !lock::is_locked() {
+                        let _ = active.hide();
                     } else {
                         window::show_main(app);
                     }
+                } else {
+                    window::show_main(app);
                 }
             }
         })
@@ -416,9 +423,9 @@ fn render_badge(base: &Image, count: u32) -> Image<'static> {
     // White digits, centered in the badge.
     let text_x = badge_x + (badge_w - text_w) / 2;
     let text_y = badge_y + (badge_h - text_h) / 2;
-    
+
     let mut glyph_x = text_x;
-    
+
     for ch in label.chars() {
         if let Some(gi) = glyph_index(ch) {
             for (row, bits) in FONT_3X5[gi].iter().enumerate() {
