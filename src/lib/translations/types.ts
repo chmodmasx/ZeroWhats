@@ -1,6 +1,16 @@
 export interface Strings {
   settingsTitle: string;
   general: string;
+  accounts: string;
+  accountsDesc: string;
+  accountName: string;
+  activeAccount: string;
+  switchAccount: string;
+  addAccount: string;
+  renameAccount: string;
+  removeAccount: string;
+  removeAccountConfirm: string;
+  primaryAccountHint: string;
   theme: string;
   themeDesc: string;
   themeSystem: string;
