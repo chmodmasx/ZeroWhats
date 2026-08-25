@@ -65,16 +65,18 @@ pub fn add_account(app: tauri::AppHandle, name: String) -> Result<Accounts, Stri
     }
 
     // The WebView did not exist when Settings last applied spell-check. Re-run
-    // the shared setting now, then publish the new account list to every live
-    // titlebar so existing windows learn about the addition immediately.
+    // the shared setting now. `show_account` also publishes the authoritative
+    // account collection to all live titlebars before revealing the new QR page.
     window::apply_spellcheck(
         &app,
         cfg.spellcheck_enabled,
         cfg.spellcheck_languages.clone(),
     );
-    window::sync_account_metadata(&app, &cfg.accounts);
+    if !window::show_account(&app, account.id) {
+        return Err("account window was created but could not be shown".to_string());
+    }
 
-    Ok(cfg.accounts)
+    Ok(Config::load(&path).accounts)
 }
 
 /// Switches presentation to an already-loaded account. Background WebViews stay
