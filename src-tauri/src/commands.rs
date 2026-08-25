@@ -6,9 +6,9 @@
 
 use tauri::Manager;
 
-use crate::accounts::{AccountError, AccountId, Accounts};
+use crate::accounts::{AccountError, AccountId, Accounts, PRIMARY_ACCOUNT_ID};
 use crate::config::{config_path, Config, ConfigPatch, ConfigView, Theme};
-use crate::{lock, password, scripts, window};
+use crate::{lock, password, scripts, unread, window};
 
 #[tauri::command]
 pub fn get_config(app: tauri::AppHandle) -> ConfigView {
@@ -105,6 +105,51 @@ pub fn rename_account(
         .map_err(|e| format!("failed to save account: {e}"))?;
 
     window::sync_account_metadata(&app, &cfg.accounts);
+    Ok(cfg.accounts)
+}
+
+/// Removes a non-legacy account and its linked WhatsApp session. Account 1 is
+/// intentionally protected because it owns ZeroWhats' historical shared profile;
+/// clearing that profile would also touch pre-migration application data. Newer
+/// accounts are isolated, so clearing their WebView storage is safe.
+#[tauri::command]
+pub fn remove_account(app: tauri::AppHandle, account_id: AccountId) -> Result<Accounts, String> {
+    if account_id == PRIMARY_ACCOUNT_ID {
+        return Err("the original account cannot be removed".to_string());
+    }
+
+    let path = config_path(&app);
+    let mut cfg = Config::load(&path);
+    if cfg.accounts.get(account_id).is_none() {
+        return Err(account_error(AccountError::NotFound));
+    }
+
+    let was_active = cfg.accounts.active_id == account_id;
+    let label = window::account_label(account_id);
+    let account_window = app
+        .get_webview_window(&label)
+        .ok_or_else(|| "account window not found; session was left untouched".to_string())?;
+
+    // Clear cookies/IndexedDB/local storage before destroying the WebView. The
+    // dedicated profile directory may remain as an empty cache container, but
+    // account ids are never reused, so it can never become another session.
+    account_window
+        .clear_all_browsing_data()
+        .map_err(|e| format!("failed to clear account session: {e}"))?;
+    account_window
+        .destroy()
+        .map_err(|e| format!("failed to close account window: {e}"))?;
+
+    cfg.accounts.remove(account_id).map_err(account_error)?;
+    cfg.save(&path)
+        .map_err(|e| format!("failed to save account removal: {e}"))?;
+
+    unread::remove(&app, account_id);
+    window::sync_account_metadata(&app, &cfg.accounts);
+    if was_active {
+        window::show_main(&app);
+    }
+
     Ok(cfg.accounts)
 }
 
