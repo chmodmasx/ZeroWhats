@@ -76,7 +76,8 @@ pub fn add_account(app: tauri::AppHandle, name: String) -> Result<Accounts, Stri
         cfg.spellcheck_languages.clone(),
     );
     if !window::show_account(&app, account.id) {
-        if let Some(account_window) = app.get_webview_window(&window::account_label(account.id)) {
+        let label = window::account_label(account.id);
+        if let Some(account_window) = app.get_webview_window(&label) {
             let _ = account_window.destroy();
         }
         let _ = cfg.accounts.remove(account.id);
