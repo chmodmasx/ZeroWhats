@@ -9,7 +9,6 @@ window.__ZW = Object.assign(window.__ZW || {}, {
   spellcheck: "__ZW_SPELLCHECK__",
   accountId: "__ZW_ACCOUNT_ID__",
   accountName: "__ZW_ACCOUNT_NAME__",
-  isActiveAccount: "__ZW_IS_ACTIVE_ACCOUNT__",
 });
 
 try {
