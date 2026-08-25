@@ -36,18 +36,15 @@
   (document.head || document.documentElement).appendChild(style);
 
   const tauri = window.__TAURI__;
-  if (!tauri?.window) return;
+  const accountId = window.__ZW?.accountId;
+  if (!tauri?.event || !accountId) return;
 
-  const win = tauri.window.getCurrentWindow();
-
-  // Every account window is created hidden to avoid the Linux compositing race
-  // described in `window.rs`. Only the persisted active account may reveal
-  // itself automatically; background accounts stay loaded but invisible. The
-  // password lock still takes precedence over the active-account flag.
-  const zw = window.__ZW || {};
-  if (!zw.hasPassword && zw.isActiveAccount) {
-    setTimeout(() => {
-      win.show().catch(() => {});
-    }, 0);
-  }
+  // Account windows are created hidden to avoid the Linux compositing race that
+  // occurs when a transparent WebView is shown before its first page chrome is
+  // installed. Rather than deciding visibility in page JS (which would become
+  // stale after account switches/reloads), announce readiness and let Rust check
+  // the current persisted active account and app-lock state before revealing it.
+  setTimeout(() => {
+    tauri.event.emit("zw://account-ready", { accountId }).catch(() => {});
+  }, 0);
 })();
