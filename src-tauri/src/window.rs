@@ -168,8 +168,9 @@ pub fn build_accounts(app: &AppHandle, cfg: &Config) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Compatibility helper retained for call sites/tests that still mean "the
-/// primary WhatsApp window". New startup code should use [`build_accounts`].
+/// Compatibility helper retained for call sites that still mean "the primary
+/// WhatsApp window". Startup remains on Account 1 until account event routing is
+/// made fully account-aware; [`build_accounts`] is ready for that later step.
 pub fn build_main(app: &AppHandle, cfg: &Config) -> tauri::Result<()> {
     let account = cfg
         .accounts
@@ -340,8 +341,17 @@ pub fn sync_has_password(app: &AppHandle, has_password: bool) {
     });
 }
 
+/// Compatibility entry point used by the current single-account window-event
+/// handler. It resolves the persisted active account and delegates to the
+/// label-aware implementation that multi-account events will use later.
+pub fn apply_unfocus_blur(app: &AppHandle, focused: bool) {
+    let cfg = Config::load(&config_path(app));
+    let label = account_label(cfg.accounts.active_id);
+    apply_unfocus_blur_for_label(app, &label, focused);
+}
+
 /// Blurs or clears one account page when that account window changes focus.
-pub fn apply_unfocus_blur(app: &AppHandle, label: &str, focused: bool) {
+pub fn apply_unfocus_blur_for_label(app: &AppHandle, label: &str, focused: bool) {
     let cfg = Config::load(&config_path(app));
     let blur = !focused && cfg.hide_content_on_unfocus;
 
