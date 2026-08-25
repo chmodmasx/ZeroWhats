@@ -40,9 +40,10 @@ pub fn get_accounts(app: tauri::AppHandle) -> Accounts {
     Config::load(&config_path(&app)).accounts
 }
 
-/// Adds a new isolated WhatsApp session and makes it active. Config is persisted
-/// before WebView creation so the remote page's early readiness event validates;
-/// if window creation fails, metadata is rolled back to the previous account.
+/// Adds a new isolated WhatsApp session. The current account remains persisted as
+/// active while the new hidden WebView is created, so a build failure never hides
+/// or displaces the working session. Once ready, `show_account` performs the real
+/// switch and copies the current window geometry to the new QR page.
 #[tauri::command]
 pub fn add_account(app: tauri::AppHandle, name: String) -> Result<Accounts, String> {
     let path = config_path(&app);
@@ -50,17 +51,19 @@ pub fn add_account(app: tauri::AppHandle, name: String) -> Result<Accounts, Stri
     let previous_active = cfg.accounts.active_id;
     let account = cfg.accounts.add(name).map_err(account_error)?;
 
+    // `Accounts::add` selects the new id by design. Keep the old account active
+    // until its replacement WebView is fully constructed; this also gives
+    // `show_account` a source window from which to copy position/size/maximized.
+    cfg.accounts
+        .set_active(previous_active)
+        .map_err(account_error)?;
     cfg.save(&path)
         .map_err(|e| format!("failed to save account: {e}"))?;
 
-    window::hide_all_accounts(&app);
     if let Err(e) = window::build_account(&app, &cfg, &account) {
-        // Restore metadata first; the previous account can then safely become
-        // visible again without leaving a broken active id in config.
         let _ = cfg.accounts.remove(account.id);
         let _ = cfg.accounts.set_active(previous_active);
         let _ = cfg.save(&path);
-        window::show_account(&app, previous_active);
         return Err(format!("failed to create account window: {e}"));
     }
 
@@ -73,6 +76,13 @@ pub fn add_account(app: tauri::AppHandle, name: String) -> Result<Accounts, Stri
         cfg.spellcheck_languages.clone(),
     );
     if !window::show_account(&app, account.id) {
+        if let Some(account_window) = app.get_webview_window(&window::account_label(account.id)) {
+            let _ = account_window.destroy();
+        }
+        let _ = cfg.accounts.remove(account.id);
+        let _ = cfg.accounts.set_active(previous_active);
+        let _ = cfg.save(&path);
+        window::show_account(&app, previous_active);
         return Err("account window was created but could not be shown".to_string());
     }
 
