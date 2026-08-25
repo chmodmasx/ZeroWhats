@@ -9,7 +9,34 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  frontend:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint
+        run: bun run lint
+
+      # Match the project's own pre-push scope. Format in the runner first so a
+      # failure prints the exact canonical diff instead of merely listing files.
+      - name: Format check
+        run: |
+          bunx oxfmt src
+          git diff --check
+          git diff --exit-code -- src
+
+      - name: Build
+        run: bun run build
+
+  rust:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -24,11 +51,6 @@ jobs:
             patchelf \
             xdg-utils
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -39,35 +61,18 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
-      - name: Install frontend dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Frontend lint
-        run: bun run lint
-
-      # Match the project's own pre-push hook. Format in the runner first so a
-      # failure prints the exact diff needed to make the branch canonical.
-      - name: Frontend format check
-        run: |
-          bunx oxfmt src
-          git diff --check
-          git diff --exit-code -- src
-
-      - name: Frontend build
-        run: bun run build
-
-      - name: Rust format check
+      - name: Format check
         working-directory: src-tauri
         run: cargo fmt --check
 
-      - name: Rust check
+      - name: Check
         working-directory: src-tauri
         run: cargo check
 
-      - name: Rust tests
+      - name: Tests
         working-directory: src-tauri
         run: cargo test
 
-      - name: Rust clippy
+      - name: Clippy
         working-directory: src-tauri
         run: cargo clippy -- -D warnings
