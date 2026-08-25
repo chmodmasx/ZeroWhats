@@ -73,7 +73,7 @@ fn last_activity() -> &'static Mutex<Instant> {
 }
 
 /// Resets the inactivity clock. Called on window focus (any app window) and on
-/// in-page activity events (mouse/keyboard) forwarded from the main webview.
+/// in-page activity events (mouse/keyboard) forwarded from WhatsApp webviews.
 pub fn record_activity() {
     if let Ok(mut guard) = last_activity().lock() {
         *guard = Instant::now();
@@ -108,8 +108,8 @@ pub fn spawn_watcher(app: &AppHandle) {
     });
 }
 
-/// Locks the app: closes the secondary windows and hides the main one. The lock
-/// window is shown lazily the next time the app is revealed (see `window`).
+/// Locks the app: closes auxiliary windows and hides every WhatsApp account.
+/// The lock window is shown lazily the next time the app is revealed.
 pub fn lock(app: &AppHandle) {
     set_locked(true);
 
@@ -119,14 +119,13 @@ pub fn lock(app: &AppHandle) {
         }
     }
 
-    if let Some(main) = app.get_webview_window(window::MAIN_LABEL) {
-        let _ = main.hide();
-    }
+    window::hide_all_accounts(app);
 }
 
 /// Verifies `input` against the stored hash (an empty/absent hash always
-/// unlocks) and, on success, reveals the main window. Returns whether it
-/// unlocked. Server-side rate limiting rejects attempts during cooldown.
+/// unlocks) and, on success, reveals the persisted active account. Returns
+/// whether it unlocked. Server-side rate limiting rejects attempts during
+/// cooldown.
 pub fn unlock(app: &AppHandle, input: &str) -> bool {
     let cfg = Config::load(&config_path(app));
 
@@ -175,7 +174,7 @@ pub fn show_lock_window(app: &AppHandle) {
         .always_on_top(true)
         .decorations(false)
         .transparent(true)
-        // No `.shadow(true)`: see the comment in `window::build_main` — the
+        // No `.shadow(true)`: see the comment in `window::build_account` — the
         // compositor's shadow is a plain rectangle and shows up as a square
         // edge around the CSS-rounded `.lock`, which already has its own
         // `box-shadow`.
