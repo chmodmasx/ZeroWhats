@@ -339,6 +339,20 @@ fn reveal_account_if_active(app: &tauri::AppHandle, account_id: accounts::Accoun
     }
 }
 
+/// Sends the authoritative account collection back only to the requesting
+/// WhatsApp WebView. The remote page can request metadata but cannot mutate it.
+fn send_accounts_state(app: &tauri::AppHandle, account_id: accounts::AccountId) {
+    let cfg = Config::load(&config_path(app));
+    if cfg.accounts.get(account_id).is_none() {
+        return;
+    }
+
+    let label = window::account_label(account_id);
+    if let Some(account) = app.get_webview_window(&label) {
+        let _ = account.emit_to(&label, "zw://accounts-state", cfg.accounts);
+    }
+}
+
 /// Bridges the page-injected scripts to the backend. App commands can't be
 /// invoked from the remote WhatsApp origin (only core commands can be granted to
 /// it), so scripts emit narrowly-scoped events. Account-sensitive events carry a
@@ -353,6 +367,30 @@ fn register_web_events(app: &tauri::AppHandle) {
             let handle = handle.clone();
             let _ = handle.clone().run_on_main_thread(move || {
                 reveal_account_if_active(&handle, payload.account_id)
+            });
+        }
+    });
+
+    let handle = app.clone();
+    app.listen("zw://accounts-request", move |event| {
+        if let Ok(payload) = serde_json::from_str::<AccountPayload>(event.payload()) {
+            if !account_exists(&handle, payload.account_id) {
+                return;
+            }
+            send_accounts_state(&handle, payload.account_id);
+        }
+    });
+
+    let handle = app.clone();
+    app.listen("zw://account-switch", move |event| {
+        if let Ok(payload) = serde_json::from_str::<AccountPayload>(event.payload()) {
+            if !account_exists(&handle, payload.account_id) {
+                log::warn!("account switch to unknown id {} ignored", payload.account_id);
+                return;
+            }
+            let handle = handle.clone();
+            let _ = handle.clone().run_on_main_thread(move || {
+                window::show_account(&handle, payload.account_id);
             });
         }
     });
