@@ -79,6 +79,12 @@ fn main() {
             apply_environment(&cfg);
             commands::apply_autostart(&handle, cfg.auto_start);
 
+            // Register the remote-event bridge and tray before creating account
+            // WebViews. Initialization scripts can emit readiness/unread events as
+            // soon as their page event loop runs, so no first event can race setup.
+            register_web_events(&handle);
+            tray::build(&handle)?;
+
             // Account 1 keeps the historical `main` WebKit profile; every later
             // account gets its own isolated WebView storage in `window`.
             window::build_accounts(&handle, &cfg)?;
@@ -87,7 +93,6 @@ fn main() {
                 cfg.spellcheck_enabled,
                 cfg.spellcheck_languages.clone(),
             );
-            register_web_events(&handle);
             lock::apply_auto_lock(&handle);
 
             if cfg.password_hash.is_some() {
@@ -95,7 +100,6 @@ fn main() {
                 lock::show_lock_window(&handle);
             }
 
-            tray::build(&handle)?;
             reassert_tray_menu(&handle);
             updater::start_background_check(&handle);
             Ok(())
@@ -259,6 +263,12 @@ struct ActionPayload {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AccountPayload {
+    account_id: accounts::AccountId,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct UnreadPayload {
     account_id: accounts::AccountId,
     count: u32,
@@ -294,12 +304,6 @@ struct RevealPayload {
     path: String,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClipboardPayload {
-    account_id: accounts::AccountId,
-}
-
 fn account_exists(app: &tauri::AppHandle, account_id: accounts::AccountId) -> bool {
     Config::load(&config_path(app))
         .accounts
@@ -307,11 +311,48 @@ fn account_exists(app: &tauri::AppHandle, account_id: accounts::AccountId) -> bo
         .is_some()
 }
 
+/// Reveals an account only if it is still the live persisted selection. Page JS
+/// merely announces readiness; Rust owns visibility so a reload can never revive
+/// an account that was switched away from in the meantime.
+fn reveal_account_if_active(app: &tauri::AppHandle, account_id: accounts::AccountId) {
+    if lock::is_locked() {
+        return;
+    }
+
+    let cfg = Config::load(&config_path(app));
+    if cfg.password_hash.is_some()
+        || cfg.accounts.active_id != account_id
+        || cfg.accounts.get(account_id).is_none()
+    {
+        return;
+    }
+
+    let label = window::account_label(account_id);
+    if let Some(account) = app.get_webview_window(&label) {
+        let _ = account.unminimize();
+        let _ = account.show();
+        let _ = account.set_focus();
+    }
+}
+
 /// Bridges the page-injected scripts to the backend. App commands can't be
 /// invoked from the remote WhatsApp origin (only core commands can be granted to
 /// it), so scripts emit narrowly-scoped events. Account-sensitive events carry a
 /// stable id, which is validated before any cross-window action is performed.
 fn register_web_events(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    app.listen("zw://account-ready", move |event| {
+        if let Ok(payload) = serde_json::from_str::<AccountPayload>(event.payload()) {
+            if !account_exists(&handle, payload.account_id) {
+                return;
+            }
+            let handle = handle.clone();
+            let _ = handle.clone().run_on_main_thread(move || {
+                reveal_account_if_active(&handle, payload.account_id)
+            });
+        }
+    });
+
     let handle = app.clone();
     app.listen("zw://action", move |event| {
         if let Ok(payload) = serde_json::from_str::<ActionPayload>(event.payload()) {
@@ -491,7 +532,7 @@ fn register_web_events(app: &tauri::AppHandle) {
     // account WebView that requested them.
     let handle = app.clone();
     app.listen("zw://paste-image-request", move |event| {
-        if let Ok(payload) = serde_json::from_str::<ClipboardPayload>(event.payload()) {
+        if let Ok(payload) = serde_json::from_str::<AccountPayload>(event.payload()) {
             if !account_exists(&handle, payload.account_id) {
                 log::warn!(
                     "clipboard event from unknown account {} ignored",
