@@ -1,12 +1,9 @@
-// The custom in-page titlebar for the single WhatsApp webview.
+// The custom in-page titlebar for each WhatsApp account webview.
 //
-// A single webview (rather than stacking a second one) means input works on
-// every platform and the dropdown can overlay the page with no clipping. The bar
-// is fixed at the top; WhatsApp's #app is pushed down with a CSS transform so its
-// own position:fixed overlays (image viewer, etc.) stay confined below the bar.
-// Window controls drive the window through the global Tauri API; the hamburger
-// opens an in-page dropdown whose items invoke our commands. The window-control
-// side follows the OS (macOS on the left).
+// Every account gets its own native webview (rather than stacking multiple
+// webviews), so input remains reliable on Linux and each session can use an
+// isolated browser profile. The titlebar itself stays inside the page, where its
+// dropdowns can overlay WhatsApp without a second webview clipping them.
 (() => {
   "use strict";
 
@@ -32,6 +29,8 @@
           prefs: "Preferências",
           shortcuts: "Atalhos de Teclado",
           about: "Sobre o ZeroWhats",
+          accounts: "Contas",
+          manageAccounts: "Gerenciar contas…",
           menu: "Menu",
           minimize: "Minimizar",
           maximize: "Maximizar",
@@ -43,6 +42,8 @@
           prefs: "Preferences",
           shortcuts: "Keyboard Shortcuts",
           about: "About ZeroWhats",
+          accounts: "Accounts",
+          manageAccounts: "Manage accounts…",
           menu: "Menu",
           minimize: "Minimize",
           maximize: "Maximize",
@@ -53,6 +54,8 @@
 
   const ICONS = {
     menu: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>',
+    chevron:
+      '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>',
     minimize:
       '<svg width="16" height="16" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>',
     // A single square = maximize; the offset double square = restore. The button
@@ -69,19 +72,23 @@
     #zw-bar{position:fixed;top:0;left:0;right:0;height:${BAR_HEIGHT}px;background:#161717;color:#fff;
       display:flex;align-items:center;gap:4px;padding:0 6px;z-index:2147483647;box-sizing:border-box;
       font-family:system-ui,'Segoe UI',sans-serif;font-size:13px;-webkit-user-select:none;user-select:none;}
-    #zw-bar .zw-title{font-weight:600;padding:0 6px;}
+    #zw-bar .zw-title{font-weight:600;padding:0 4px 0 6px;}
     #zw-bar .zw-spacer{flex:1;align-self:stretch;}
     #zw-bar button{all:unset;display:grid;place-items:center;width:36px;height:30px;border-radius:8px;cursor:pointer;color:#fff;}
     #zw-bar button:hover{background:rgba(255,255,255,.12);}
     #zw-bar button.zw-close:hover{background:#e01b24;}
-    #zw-menu{position:fixed;top:${BAR_HEIGHT + 2}px;z-index:2147483647;background:#2a2a2c;color:#fff;
+    #zw-bar button.zw-account{display:flex;align-items:center;gap:5px;width:auto;max-width:190px;padding:0 8px;
+      color:rgba(255,255,255,.78);font-size:12px;}
+    #zw-bar button.zw-account .zw-account-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    #zw-menu,#zw-account-menu{position:fixed;top:${BAR_HEIGHT + 2}px;z-index:2147483647;background:#2a2a2c;color:#fff;
       border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:6px;min-width:248px;
       box-shadow:0 12px 34px rgba(0,0,0,.45);font-family:system-ui,sans-serif;font-size:13px;}
-    #zw-menu button{all:unset;display:flex;justify-content:space-between;gap:24px;width:100%;
+    #zw-menu button,#zw-account-menu button{all:unset;display:flex;justify-content:space-between;align-items:center;gap:24px;width:100%;
       box-sizing:border-box;padding:8px 10px;border-radius:7px;cursor:pointer;}
-    #zw-menu button:hover{background:rgba(255,255,255,.08);}
-    #zw-menu .zw-acc{opacity:.5;font-family:monospace;}
-    #zw-menu .zw-sep{height:1px;background:rgba(255,255,255,.12);margin:4px 2px;}
+    #zw-menu button:hover,#zw-account-menu button:hover{background:rgba(255,255,255,.08);}
+    #zw-menu .zw-acc,#zw-account-menu .zw-acc{opacity:.5;font-family:monospace;}
+    #zw-menu .zw-sep,#zw-account-menu .zw-sep{height:1px;background:rgba(255,255,255,.12);margin:4px 2px;}
+    #zw-account-menu .zw-current{color:#25d366;font-weight:600;}
     /* Shift WhatsApp down via a TRANSFORM (not top): a transformed ancestor
        becomes the containing block for its position:fixed descendants, so the
        media/image viewer and other fixed overlays stay below the bar. */
@@ -89,6 +96,8 @@
   `;
 
   const currentWindow = () => tauri.window.getCurrentWindow();
+  const accountId = () => Number(window.__ZW?.accountId || 0);
+  const accountName = () => window.__ZW?.accountName || `Account ${accountId() || 1}`;
 
   // App commands cannot be invoked from a remote origin (only core commands can
   // be granted to it), so menu actions are sent as events the Rust side listens
@@ -101,14 +110,29 @@
     }
   };
 
+  const requestAccounts = () => {
+    const id = accountId();
+    if (!id) return;
+    tauri.event.emit("zw://accounts-request", { accountId: id }).catch(() => {});
+  };
+
+  const switchAccount = (id) => {
+    if (!id || id === accountId()) return;
+    tauri.event.emit("zw://account-switch", { accountId: id }).catch((e) => {
+      console.error(`[ZeroWhats] account switch to '${id}' failed`, e);
+    });
+  };
+
   // Lock is only offered once a password is configured (mirrors the tray).
   const hasPassword = () => !!(window.__ZW && window.__ZW.hasPassword);
 
-  /** A lightweight in-page dropdown menu anchored under the hamburger button. */
+  /** A lightweight in-page dropdown menu anchored under a titlebar control. */
   class Dropdown {
-    constructor(items) {
+    constructor(items, id = "zw-menu") {
       this.items = items;
+      this.id = id;
       this.el = null;
+      this.anchorLeft = 0;
       this._onOutsidePointerDown = this._onOutsidePointerDown.bind(this);
     }
 
@@ -122,8 +146,9 @@
     }
 
     open(anchorLeft) {
+      this.anchorLeft = anchorLeft;
       this.el = document.createElement("div");
-      this.el.id = "zw-menu";
+      this.el.id = this.id;
       this.el.style.left = `${anchorLeft}px`;
 
       for (const item of this.items) {
@@ -140,7 +165,6 @@
       if (!this.el) return;
       this.el.remove();
       this.el = null;
-
       document.removeEventListener("mousedown", this._onOutsidePointerDown, true);
     }
 
@@ -150,23 +174,24 @@
       return sep;
     }
 
-    _renderItem({ label, accelerator, action }) {
+    _renderItem({ label, accelerator, action, onSelect, current }) {
       const button = document.createElement("button");
       const text = document.createElement("span");
 
       text.textContent = label;
       button.appendChild(text);
 
-      if (accelerator) {
+      if (accelerator || current) {
         const acc = document.createElement("span");
-        acc.className = "zw-acc";
-        acc.textContent = accelerator;
+        acc.className = current ? "zw-current" : "zw-acc";
+        acc.textContent = current ? "✓" : accelerator;
         button.appendChild(acc);
       }
 
       button.addEventListener("click", () => {
         this.close();
-        emitAction(action);
+        if (onSelect) onSelect();
+        else if (action) emitAction(action);
       });
 
       return button;
@@ -177,9 +202,12 @@
     }
   }
 
-  /** The fixed top bar: hamburger menu, drag region and window controls. */
+  /** The fixed top bar: menus, drag region and window controls. */
   class Titlebar {
     constructor() {
+      this.accountsState = null;
+      this.accountButton = null;
+      this.accountMenu = null;
       this.menu = new Dropdown([
         { label: STRINGS.lock, accelerator: "Ctrl+L", action: "lock", when: hasPassword },
         { separator: true, when: hasPassword },
@@ -193,7 +221,10 @@
       this._injectStyle();
       document.documentElement.classList.add("zw-shift");
 
+      this._listenAccounts();
       this._buildBar();
+      requestAccounts();
+
       // WhatsApp can wipe the bar on navigation; cheaply re-add it if it vanishes.
       // A low-frequency poll avoids a subtree MutationObserver on WhatsApp's very
       // busy DOM (which firing per-mutation caused noticeable jank).
@@ -227,6 +258,28 @@
       );
     }
 
+    _listenAccounts() {
+      tauri.event
+        .listen("zw://accounts-state", (event) => {
+          const state = event.payload;
+          if (!state || !Array.isArray(state.items)) return;
+          this.accountsState = state;
+
+          const own = state.items.find((account) => account.id === accountId());
+          if (own && window.__ZW) window.__ZW.accountName = own.name;
+          this._syncAccountButton();
+
+          // If metadata changed while the switcher is open (rename/add), rebuild
+          // it in place so the menu never displays stale account names.
+          if (this.accountMenu?.isOpen) {
+            const left = this.accountMenu.anchorLeft;
+            this.accountMenu.close();
+            this._openAccountMenu(left);
+          }
+        })
+        .catch((e) => console.error("[ZeroWhats] account-state listener failed", e));
+    }
+
     _injectStyle() {
       if (document.getElementById("zw-style")) return;
 
@@ -247,6 +300,53 @@
       return button;
     }
 
+    _buildAccountButton() {
+      const button = document.createElement("button");
+      button.className = "zw-account";
+      button.title = STRINGS.accounts;
+
+      const name = document.createElement("span");
+      name.className = "zw-account-name";
+      name.textContent = accountName();
+      button.appendChild(name);
+
+      const chevron = document.createElement("span");
+      chevron.innerHTML = ICONS.chevron;
+      button.appendChild(chevron);
+
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        requestAccounts();
+        const left = Math.max(6, Math.round(button.getBoundingClientRect().left));
+        if (this.accountMenu?.isOpen) this.accountMenu.close();
+        else this._openAccountMenu(left);
+      });
+
+      this.accountButton = button;
+      return button;
+    }
+
+    _syncAccountButton() {
+      const name = this.accountButton?.querySelector(".zw-account-name");
+      if (name) name.textContent = accountName();
+    }
+
+    _openAccountMenu(left) {
+      const items = this.accountsState?.items?.length
+        ? this.accountsState.items.map((account) => ({
+            label: account.name,
+            current: account.id === this.accountsState.active_id,
+            onSelect: () => switchAccount(account.id),
+          }))
+        : [{ label: accountName(), current: true, onSelect: () => {} }];
+
+      items.push({ separator: true });
+      items.push({ label: STRINGS.manageAccounts, action: "settings" });
+
+      this.accountMenu = new Dropdown(items, "zw-account-menu");
+      this.accountMenu.open(left);
+    }
+
     _buildBar() {
       if (document.getElementById("zw-bar")) return;
 
@@ -259,6 +359,7 @@
       title.className = "zw-title";
       title.textContent = "ZeroWhats";
 
+      const account = this._buildAccountButton();
       const spacer = document.createElement("div");
       spacer.className = "zw-spacer";
 
@@ -290,8 +391,8 @@
       }
 
       const layout = IS_MAC
-        ? [close, minimize, maximize, hamburger, title, spacer]
-        : [hamburger, title, spacer, minimize, maximize, close];
+        ? [close, minimize, maximize, hamburger, title, account, spacer]
+        : [hamburger, title, account, spacer, minimize, maximize, close];
 
       for (const el of layout) bar.appendChild(el);
       (document.body || document.documentElement).appendChild(bar);
