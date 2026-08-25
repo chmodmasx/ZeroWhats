@@ -13,13 +13,13 @@
 // regardless of how it's invoked (real click, programmatic .click(), or
 // dispatchEvent): if the anchor has a blob:/data: href and a `download`
 // attribute, the blob is read here and the bytes are shipped to Rust over the
-// zw:// event bridge (app commands are blocked from this remote origin),
-// which writes the file to the configured downloads folder. The original
-// click() still runs too, as a harmless no-op fallback.
+// zw:// event bridge. The account id travels with the request so the result toast
+// is emitted only back to the WhatsApp window that initiated the download.
 (() => {
   "use strict";
 
   const tauri = window.__TAURI__;
+  const accountId = window.__ZW?.accountId;
 
   const pt = (navigator.language || "en").toLowerCase().startsWith("pt");
   const STRINGS = pt
@@ -130,7 +130,7 @@
     dismissTimer = setTimeout(dismissToast, 6000);
   };
 
-  // Listen for download results from Rust
+  // Rust targets this event to the originating account window only.
   tauri?.event?.listen("zw://download-result", (event) => {
     const { ok, name, path } = event.payload;
     showToast(ok, name, path);
@@ -151,6 +151,7 @@
       const response = await fetch(href);
       const buffer = await response.arrayBuffer();
       tauri?.event?.emit("zw://download", {
+        accountId,
         name: name || "download",
         data: toBase64(buffer),
       });
