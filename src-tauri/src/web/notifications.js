@@ -2,20 +2,20 @@
 //
 // Both notification paths the page can use — `new Notification(...)` and the
 // service-worker `registration.showNotification(...)` — are intercepted and
-// forwarded to the Rust `notify` command (which enforces muting). Going through
-// the OS means no MPRIS media session is created for every ping, so the system
-// media controls stay clean. Permission is reported as already granted and
-// `requestPermission()` is stubbed so WhatsApp never shows its own prompt.
+// forwarded to Rust. The stable account id travels with each notification so a
+// click can reveal the WhatsApp session that actually produced it.
 (() => {
   "use strict";
 
   const tauri = window.__TAURI__;
+  const accountId = window.__ZW?.accountId;
 
   // App commands are blocked from this remote origin, so notifications are sent
   // as an event the Rust side listens for (event emit is a core command).
   const emit = (title, body, icon) => {
     try {
       tauri?.event?.emit("zw://notify", {
+        accountId,
         title: title || "WhatsApp",
         body: body || "",
         icon: icon || null,
