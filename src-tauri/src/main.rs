@@ -10,6 +10,7 @@ mod notification;
 mod password;
 mod scripts;
 mod tray;
+mod unread;
 mod updater;
 mod window;
 
@@ -46,8 +47,8 @@ fn main() {
         )
         .plugin(
             tauri_plugin_window_state::Builder::default()
-                // Only the main window's geometry is worth remembering; the modal
-                // screens stay centered at their fixed sizes.
+                // WhatsApp account windows keep their native window state; the
+                // fixed-size React utility windows always reopen centered.
                 .with_denylist(&["settings", "about", "shortcuts", "lock", "update"])
                 .build(),
         )
@@ -78,7 +79,9 @@ fn main() {
             apply_environment(&cfg);
             commands::apply_autostart(&handle, cfg.auto_start);
 
-            window::build_main(&handle, &cfg)?;
+            // Account 1 keeps the historical `main` WebKit profile; every later
+            // account gets its own isolated WebView storage in `window`.
+            window::build_accounts(&handle, &cfg)?;
             window::apply_spellcheck(
                 &handle,
                 cfg.spellcheck_enabled,
@@ -100,13 +103,15 @@ fn main() {
         .on_window_event(|win, event| {
             // Focus on ANY app window resets the auto-lock idle clock — typing in
             // Settings, or simply switching back to an already-focused window,
-            // both count as "the user is here". Handled before the main-window
-            // filter below so every window benefits, not just the main one.
+            // both count as "the user is here". Handled before the WhatsApp-window
+            // filter below so every local window benefits too.
             if let WindowEvent::Focused(true) = event {
                 lock::record_activity();
             }
 
-            if win.label() != window::MAIN_LABEL {
+            // Only WhatsApp account windows get close-to-tray and privacy-blur
+            // behaviour. Local React windows keep their normal close lifecycle.
+            if window::account_id_from_label(win.label()).is_none() {
                 return;
             }
 
@@ -121,10 +126,9 @@ fn main() {
                     }
                     api.prevent_close();
                 }
-                // Blur the page when focus leaves the window (privacy for
-                // screenshots / thumbnails / screen-sharing); clear it on return.
+                // Blur only the account page whose focus actually changed.
                 WindowEvent::Focused(focused) => {
-                    window::apply_unfocus_blur(win.app_handle(), *focused);
+                    window::apply_unfocus_blur_for_label(win.app_handle(), win.label(), *focused);
                 }
                 _ => {}
             }
@@ -254,12 +258,16 @@ struct ActionPayload {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct UnreadPayload {
+    account_id: accounts::AccountId,
     count: u32,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct NotifyPayload {
+    account_id: accounts::AccountId,
     title: Option<String>,
     body: Option<String>,
     /// The sender avatar as a `data:` URL (see `web/notifications.js`), or
@@ -273,7 +281,9 @@ struct UrlPayload {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DownloadPayload {
+    account_id: accounts::AccountId,
     name: String,
     /// Base64-encoded file bytes (see `web/download.js`).
     data: String,
@@ -284,11 +294,23 @@ struct RevealPayload {
     path: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClipboardPayload {
+    account_id: accounts::AccountId,
+}
+
+fn account_exists(app: &tauri::AppHandle, account_id: accounts::AccountId) -> bool {
+    Config::load(&config_path(app))
+        .accounts
+        .get(account_id)
+        .is_some()
+}
+
 /// Bridges the page-injected scripts to the backend. App commands can't be
 /// invoked from the remote WhatsApp origin (only core commands can be granted to
-/// it), so the scripts emit events — `event emit` is a core command — and we
-/// dispatch them here. Window/menu work is hopped onto the main thread because
-/// GTK window creation must run there.
+/// it), so scripts emit narrowly-scoped events. Account-sensitive events carry a
+/// stable id, which is validated before any cross-window action is performed.
 fn register_web_events(app: &tauri::AppHandle) {
     let handle = app.clone();
     app.listen("zw://action", move |event| {
@@ -303,19 +325,36 @@ fn register_web_events(app: &tauri::AppHandle) {
     let handle = app.clone();
     app.listen("zw://unread", move |event| {
         if let Ok(payload) = serde_json::from_str::<UnreadPayload>(event.payload()) {
+            if !account_exists(&handle, payload.account_id) {
+                log::warn!("unread event from unknown account {} ignored", payload.account_id);
+                return;
+            }
             let handle = handle.clone();
-            let _ = handle
-                .clone()
-                .run_on_main_thread(move || tray::set_unread(&handle, payload.count));
+            let _ = handle.clone().run_on_main_thread(move || {
+                unread::set(&handle, payload.account_id, payload.count)
+            });
         }
     });
 
     let handle = app.clone();
     app.listen("zw://notify", move |event| {
         if let Ok(payload) = serde_json::from_str::<NotifyPayload>(event.payload()) {
+            if !account_exists(&handle, payload.account_id) {
+                log::warn!(
+                    "notification event from unknown account {} ignored",
+                    payload.account_id
+                );
+                return;
+            }
             let handle = handle.clone();
             let _ = handle.clone().run_on_main_thread(move || {
-                notification::notify(&handle, payload.title, payload.body, payload.icon)
+                notification::notify(
+                    &handle,
+                    payload.account_id,
+                    payload.title,
+                    payload.body,
+                    payload.icon,
+                )
             });
         }
     });
@@ -333,14 +372,17 @@ fn register_web_events(app: &tauri::AppHandle) {
         }
     });
 
-    // Blob-URL attachment downloads (see `web/download.js` for why these never
-    // reach WebKitGTK's own `on_download`): the page ships the captured bytes
-    // here, base64-encoded, and this decodes + writes them to the configured
-    // downloads folder directly — or prompts "save as" when `auto_download`
-    // is disabled.
+    // Blob-URL attachment downloads are decoded and saved in Rust. The account
+    // id is used only to route the completion toast back to its originating
+    // window; it never participates in filesystem path construction.
     let handle = app.clone();
     app.listen("zw://download", move |event| {
         if let Ok(mut payload) = serde_json::from_str::<DownloadPayload>(event.payload()) {
+            if !account_exists(&handle, payload.account_id) {
+                log::warn!("download event from unknown account {} ignored", payload.account_id);
+                return;
+            }
+
             payload.name = std::path::Path::new(&payload.name)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -349,7 +391,13 @@ fn register_web_events(app: &tauri::AppHandle) {
             const MAX_DOWNLOAD_B64: usize = 341_333_334; // ~256 MB decoded
             if payload.data.len() > MAX_DOWNLOAD_B64 {
                 log::warn!("blob download '{}' exceeds 256 MB limit", payload.name);
-                emit_download_result(&handle, &payload.name, false, None);
+                emit_download_result(
+                    &handle,
+                    payload.account_id,
+                    &payload.name,
+                    false,
+                    None,
+                );
                 return;
             }
 
@@ -358,7 +406,13 @@ fn register_web_events(app: &tauri::AppHandle) {
                 Ok(b) => b,
                 Err(e) => {
                     log::warn!("failed to decode blob download '{}': {e}", payload.name);
-                    emit_download_result(&handle, &payload.name, false, None);
+                    emit_download_result(
+                        &handle,
+                        payload.account_id,
+                        &payload.name,
+                        false,
+                        None,
+                    );
                     return;
                 }
             };
@@ -372,9 +426,16 @@ fn register_web_events(app: &tauri::AppHandle) {
                         (false, None)
                     }
                 };
-                emit_download_result(&handle, &payload.name, ok, path);
+                emit_download_result(
+                    &handle,
+                    payload.account_id,
+                    &payload.name,
+                    ok,
+                    path,
+                );
             } else {
                 use tauri_plugin_dialog::DialogExt;
+                let account_id = payload.account_id;
                 let name = payload.name.clone();
                 let h = handle.clone();
                 handle
@@ -394,7 +455,7 @@ fn register_web_events(app: &tauri::AppHandle) {
                                 (false, None)
                             }
                         };
-                        emit_download_result(&h, &name, ok, path);
+                        emit_download_result(&h, account_id, &name, ok, path);
                     });
             }
         }
@@ -426,34 +487,49 @@ fn register_web_events(app: &tauri::AppHandle) {
         }
     });
 
-    // Image paste bridge: the page asks for the clipboard image (WebKitGTK can't
-    // give it one itself), we read it and emit it back as a PNG data URL. A
-    // `None` result means there was no image — the page then falls back to the
-    // normal paste. Emitted only to the main window so other windows don't see
-    // it.
+    // Image paste bridge: read clipboard files once and emit them only to the
+    // account WebView that requested them.
     let handle = app.clone();
-    app.listen("zw://paste-image-request", move |_event| {
-        let files = clipboard::read_clipboard_files();
-        if let Some(main) = handle.get_webview_window(window::MAIN_LABEL) {
-            let _ = main.emit_to(window::MAIN_LABEL, "zw://paste-image-data", files);
+    app.listen("zw://paste-image-request", move |event| {
+        if let Ok(payload) = serde_json::from_str::<ClipboardPayload>(event.payload()) {
+            if !account_exists(&handle, payload.account_id) {
+                log::warn!(
+                    "clipboard event from unknown account {} ignored",
+                    payload.account_id
+                );
+                return;
+            }
+            let files = clipboard::read_clipboard_files();
+            let label = window::account_label(payload.account_id);
+            if let Some(account) = handle.get_webview_window(&label) {
+                let _ = account.emit_to(&label, "zw://paste-image-data", files);
+            }
         }
     });
 
-    // Mouse/keyboard activity inside the main (WhatsApp) webview resets the
-    // auto-lock idle clock — see `lock::record_activity`. Window-focus changes
-    // on every window are handled separately in `on_window_event`, so together
-    // the timer sees activity no matter which app window the user is in.
+    // Mouse/keyboard activity inside any WhatsApp WebView resets the same global
+    // auto-lock clock. Window-focus activity is handled separately above.
     app.listen("zw://activity", move |_event| {
         lock::record_activity();
     });
 }
 
-/// Emits a download-result event to the main webview so the injected toast can
-/// show success/failure feedback.
-fn emit_download_result(app: &tauri::AppHandle, name: &str, ok: bool, path: Option<String>) {
-    if let Some(main) = app.get_webview_window(window::MAIN_LABEL) {
-        let _ = main.emit_to(
-            window::MAIN_LABEL,
+/// Emits a download-result event only to the account WebView that initiated it.
+fn emit_download_result(
+    app: &tauri::AppHandle,
+    account_id: accounts::AccountId,
+    name: &str,
+    ok: bool,
+    path: Option<String>,
+) {
+    if !account_exists(app, account_id) {
+        return;
+    }
+
+    let label = window::account_label(account_id);
+    if let Some(account) = app.get_webview_window(&label) {
+        let _ = account.emit_to(
+            &label,
             "zw://download-result",
             serde_json::json!({ "ok": ok, "name": name, "path": path }),
         );
