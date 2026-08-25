@@ -1,6 +1,7 @@
 //! Persisted app settings: the on-disk [`Config`], its frontend-facing views
 //! ([`ConfigView`]/[`ConfigPatch`]), and the `Theme` enum.
 
+use crate::accounts::Accounts;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -83,6 +84,10 @@ pub struct Config {
     pub theme: Theme,
     /// "en" / "pt-br", or None to follow the system locale.
     pub locale: Option<String>,
+    /// Internal WhatsApp-account metadata. It deliberately stays out of
+    /// `ConfigView` / `ConfigPatch`: account-specific commands own these fields,
+    /// while old configs transparently default to the legacy Account 1.
+    pub accounts: Accounts,
     pub proxy_enabled: bool,
     pub proxy_url: String,
     pub auto_download: bool,
@@ -118,6 +123,7 @@ impl Default for Config {
         Config {
             theme: Theme::System,
             locale: None,
+            accounts: Accounts::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             auto_download: true,
@@ -172,6 +178,12 @@ impl Config {
             cfg.notification_privacy = NotificationPrivacy::Hidden;
         }
 
+        // Pre-multi-account configs have no `accounts` field, so serde supplies
+        // `Accounts::default()` here: Account 1 represents the existing WebKit
+        // session without moving or rewriting its profile data. Normalization is
+        // metadata-only and also repairs user-edited/partial account state.
+        cfg.accounts.normalize();
+
         cfg
     }
 
@@ -208,7 +220,8 @@ impl Config {
 }
 
 /// The config as exposed to the frontend (Settings/Lock screens). Hides the
-/// password hash, surfacing only whether a password is set.
+/// password hash and internal account metadata, surfacing only whether a
+/// password is set.
 #[derive(serde::Serialize)]
 pub struct ConfigView {
     pub theme: Theme,
@@ -253,7 +266,8 @@ impl From<Config> for ConfigView {
 }
 
 /// The settings the frontend can change (everything in [`ConfigView`] except the
-/// derived `has_password`). The password is changed via its own command.
+/// derived `has_password`). Password and account metadata are changed through
+/// their own commands.
 #[derive(serde::Deserialize)]
 pub struct ConfigPatch {
     pub theme: Theme,
@@ -275,7 +289,7 @@ pub struct ConfigPatch {
 
 impl ConfigPatch {
     /// Applies the patch onto a loaded config, preserving fields the frontend
-    /// doesn't own (e.g. the password hash).
+    /// doesn't own (e.g. the password hash and account metadata).
     pub fn apply_to(self, cfg: &mut Config) {
         cfg.theme = self.theme;
         cfg.locale = self.locale;
@@ -298,6 +312,7 @@ impl ConfigPatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounts::PRIMARY_ACCOUNT_ID;
     use std::io::Write;
 
     fn load_from_json(json: &str) -> Config {
@@ -337,6 +352,16 @@ mod tests {
         let cfg =
             load_from_json(r#"{ "notification_privacy": "full", "mute_notifications": true }"#);
         assert_eq!(cfg.notification_privacy, NotificationPrivacy::Hidden);
+    }
+
+    #[test]
+    fn legacy_config_without_accounts_becomes_account_one() {
+        let cfg = load_from_json(r#"{ "theme": "dark", "auto_start": true }"#);
+        assert_eq!(cfg.accounts.items.len(), 1);
+        assert_eq!(cfg.accounts.active_id, PRIMARY_ACCOUNT_ID);
+        assert_eq!(cfg.accounts.next_id, 2);
+        assert_eq!(cfg.accounts.active().name, "Account 1");
+        assert!(cfg.accounts.active().uses_legacy_storage());
     }
 
     // --- NotificationPrivacy ---
@@ -438,6 +463,7 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.theme, Theme::System);
         assert!(cfg.locale.is_none());
+        assert_eq!(cfg.accounts, Accounts::default());
         assert!(!cfg.proxy_enabled);
         assert!(cfg.proxy_url.is_empty());
         assert!(cfg.auto_download);
@@ -461,6 +487,7 @@ mod tests {
         let cfg = Config::load(Path::new("/tmp/zw-test-nonexistent-config.json"));
         assert_eq!(cfg.theme, Theme::System);
         assert!(cfg.auto_download);
+        assert_eq!(cfg.accounts, Accounts::default());
     }
 
     #[test]
@@ -475,6 +502,7 @@ mod tests {
         assert_eq!(cfg.theme, Theme::System);
         assert!(cfg.auto_download);
         assert!(cfg.spellcheck_enabled);
+        assert_eq!(cfg.accounts, Accounts::default());
     }
 
     #[test]
@@ -484,6 +512,7 @@ mod tests {
         assert!(cfg.auto_start);
         assert!(cfg.auto_download);
         assert!(cfg.spellcheck_enabled);
+        assert_eq!(cfg.accounts, Accounts::default());
     }
 
     #[test]
@@ -492,6 +521,14 @@ mod tests {
             r#"{
                 "theme": "light",
                 "locale": "pt-br",
+                "accounts": {
+                    "items": [
+                        { "id": 1, "name": "Personal" },
+                        { "id": 2, "name": "Work" }
+                    ],
+                    "active_id": 2,
+                    "next_id": 3
+                },
                 "proxy_enabled": true,
                 "proxy_url": "socks5://localhost:1080",
                 "auto_download": false,
@@ -510,6 +547,10 @@ mod tests {
         );
         assert_eq!(cfg.theme, Theme::Light);
         assert_eq!(cfg.locale.as_deref(), Some("pt-br"));
+        assert_eq!(cfg.accounts.items.len(), 2);
+        assert_eq!(cfg.accounts.active_id, 2);
+        assert_eq!(cfg.accounts.active().name, "Work");
+        assert_eq!(cfg.accounts.next_id, 3);
         assert!(cfg.proxy_enabled);
         assert_eq!(cfg.proxy_url, "socks5://localhost:1080");
         assert!(!cfg.auto_download);
@@ -552,6 +593,8 @@ mod tests {
         assert!(!raw.contains("mute_notifications"));
         assert!(raw.contains("notification_privacy"));
         assert!(raw.contains("hide_content_on_unfocus"));
+        assert!(raw.contains("\"accounts\""));
+        assert!(raw.contains("\"Account 1\""));
     }
 
     #[test]
@@ -585,6 +628,7 @@ mod tests {
         let schema: serde_json::Value = serde_json::from_str(&schema_raw).unwrap();
         assert!(schema.get("properties").is_some());
         assert!(schema["properties"].get("theme").is_some());
+        assert!(schema["properties"].get("accounts").is_some());
         assert!(schema["properties"].get("notification_privacy").is_some());
     }
 
@@ -596,6 +640,7 @@ mod tests {
         let mut original = Config::default();
         original.theme = Theme::Dark;
         original.locale = Some("en".into());
+        original.accounts.add("Work").unwrap();
         original.proxy_enabled = true;
         original.proxy_url = "http://proxy:8080".into();
         original.auto_download = false;
@@ -610,6 +655,9 @@ mod tests {
         let loaded = Config::load(&path);
         assert_eq!(loaded.theme, Theme::Dark);
         assert_eq!(loaded.locale.as_deref(), Some("en"));
+        assert_eq!(loaded.accounts.items.len(), 2);
+        assert_eq!(loaded.accounts.active().name, "Work");
+        assert_eq!(loaded.accounts.next_id, 3);
         assert!(loaded.proxy_enabled);
         assert_eq!(loaded.proxy_url, "http://proxy:8080");
         assert!(!loaded.auto_download);
@@ -677,15 +725,17 @@ mod tests {
     // --- ConfigView ---
 
     #[test]
-    fn config_view_hides_password_hash() {
+    fn config_view_hides_internal_fields() {
         let mut cfg = Config::default();
         cfg.password_hash = Some("$argon2id$secret".into());
+        cfg.accounts.add("Work").unwrap();
         let view: ConfigView = cfg.into();
         assert!(view.has_password);
 
         let json = serde_json::to_string(&view).unwrap();
         assert!(!json.contains("argon2id"));
         assert!(!json.contains("password_hash"));
+        assert!(!json.contains("accounts"));
         assert!(json.contains("has_password"));
     }
 
@@ -720,9 +770,11 @@ mod tests {
     // --- ConfigPatch ---
 
     #[test]
-    fn patch_preserves_password_hash() {
+    fn patch_preserves_internal_fields() {
         let mut cfg = Config::default();
         cfg.password_hash = Some("secret_hash".into());
+        cfg.accounts.add("Work").unwrap();
+        let accounts_before = cfg.accounts.clone();
 
         let patch: ConfigPatch = serde_json::from_str(
             r#"{
@@ -751,6 +803,7 @@ mod tests {
         assert!(cfg.lock_on_close);
         assert_eq!(cfg.auto_lock_minutes, Some(5));
         assert_eq!(cfg.password_hash.as_deref(), Some("secret_hash"));
+        assert_eq!(cfg.accounts, accounts_before);
     }
 
     #[test]
@@ -794,5 +847,6 @@ mod tests {
         assert_eq!(cfg.auto_lock_minutes, Some(30));
         assert!(!cfg.spellcheck_enabled);
         assert_eq!(cfg.spellcheck_languages, vec!["pt_BR"]);
+        assert_eq!(cfg.accounts, Accounts::default());
     }
 }
