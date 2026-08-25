@@ -46,6 +46,45 @@
   text-align: right;
 }
 
+/* Account controls deliberately reuse the same input/buttons as the rest of
+   Settings; this wrapper only manages the compact responsive layout. */
+.accountActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.accountActions .input {
+  min-width: 9rem;
+  max-width: 14rem;
+}
+
+.activePill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.8rem;
+  padding: 0 0.55rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.accountsStatus,
+.accountError {
+  padding: 0.8rem 1rem;
+  font-size: 0.85rem;
+  opacity: 0.72;
+}
+
+.accountError {
+  color: var(--danger);
+  opacity: 1;
+}
+
 /* Settings tab bar. */
 .tabs {
   display: flex;
