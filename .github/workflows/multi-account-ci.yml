@@ -45,11 +45,13 @@ jobs:
       - name: Frontend lint
         run: bun run lint
 
-      # Match the project's own pre-push hook. The package-level format:check
-      # scans unrelated legacy docs/release files that are not formatted by the
-      # upstream hook and therefore makes a clean baseline fail CI.
+      # Match the project's own pre-push hook. Format in the runner first so a
+      # failure prints the exact diff needed to make the branch canonical.
       - name: Frontend format check
-        run: bunx oxfmt --check src
+        run: |
+          bunx oxfmt src
+          git diff --check
+          git diff --exit-code -- src
 
       - name: Frontend build
         run: bun run build
