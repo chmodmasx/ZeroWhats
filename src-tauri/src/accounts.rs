@@ -2,10 +2,10 @@
 //!
 //! Account 1 is special: it represents the pre-multi-account WhatsApp session
 //! and therefore keeps using ZeroWhats' historical WebKit storage location.
-//! Additional accounts receive their own storage directory when account-aware
-//! webviews are introduced. Keeping that distinction in the model lets the
-//! migration add metadata without moving, copying, or invalidating the existing
-//! WhatsApp session.
+//! Additional accounts will receive their own storage directory when
+//! account-aware webviews are introduced. Keeping that distinction in the model
+//! lets migration add metadata without moving, copying, or invalidating the
+//! existing WhatsApp session.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -24,19 +24,13 @@ pub struct Account {
 }
 
 impl Account {
-    pub fn new(id: AccountId, name: impl Into<String>) -> Self {
+    fn new(id: AccountId, name: impl Into<String>) -> Self {
         let mut account = Account {
             id,
             name: name.into(),
         };
         account.normalize_name();
         account
-    }
-
-    /// Account 1 deliberately keeps the legacy WebKit profile. This is the
-    /// migration guarantee that preserves an already-linked WhatsApp session.
-    pub fn uses_legacy_storage(&self) -> bool {
-        self.id == PRIMARY_ACCOUNT_ID
     }
 
     fn normalize_name(&mut self) {
@@ -48,8 +42,8 @@ impl Account {
 }
 
 /// Persisted account collection. IDs are stable and monotonically allocated;
-/// deleting an account never rewinds `next_id`, so a removed profile id is not
-/// silently reused for another WhatsApp session later.
+/// deleting an account later must never rewind `next_id`, so a removed profile
+/// id cannot silently become a different WhatsApp session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(default)]
 pub struct Accounts {
@@ -68,70 +62,7 @@ impl Default for Accounts {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AccountError {
-    NotFound,
-    LastAccount,
-    IdExhausted,
-}
-
 impl Accounts {
-    pub fn active(&self) -> &Account {
-        self.get(self.active_id)
-            .unwrap_or_else(|| self.items.first().expect("accounts are normalized"))
-    }
-
-    pub fn get(&self, id: AccountId) -> Option<&Account> {
-        self.items.iter().find(|account| account.id == id)
-    }
-
-    pub fn add(&mut self, name: impl Into<String>) -> Result<Account, AccountError> {
-        let id = self.next_available_id()?;
-        let account = Account::new(id, name);
-        self.items.push(account.clone());
-        self.active_id = id;
-        self.next_id = id.checked_add(1).unwrap_or(id);
-        Ok(account)
-    }
-
-    pub fn rename(&mut self, id: AccountId, name: impl Into<String>) -> Result<(), AccountError> {
-        let account = self
-            .items
-            .iter_mut()
-            .find(|account| account.id == id)
-            .ok_or(AccountError::NotFound)?;
-        account.name = name.into();
-        account.normalize_name();
-        Ok(())
-    }
-
-    pub fn set_active(&mut self, id: AccountId) -> Result<(), AccountError> {
-        if self.get(id).is_none() {
-            return Err(AccountError::NotFound);
-        }
-        self.active_id = id;
-        Ok(())
-    }
-
-    pub fn remove(&mut self, id: AccountId) -> Result<Account, AccountError> {
-        if self.items.len() <= 1 {
-            return Err(AccountError::LastAccount);
-        }
-
-        let index = self
-            .items
-            .iter()
-            .position(|account| account.id == id)
-            .ok_or(AccountError::NotFound)?;
-        let removed = self.items.remove(index);
-
-        if self.active_id == id {
-            self.active_id = self.items[0].id;
-        }
-
-        Ok(removed)
-    }
-
     /// Repairs user-edited / partially migrated config without ever touching
     /// WebKit profile data. The first valid occurrence of an id wins; invalid
     /// zero/duplicate ids are discarded, an empty list becomes legacy Account 1,
@@ -150,7 +81,7 @@ impl Accounts {
             return;
         }
 
-        if self.get(self.active_id).is_none() {
+        if !self.items.iter().any(|account| account.id == self.active_id) {
             self.active_id = self.items[0].id;
         }
 
@@ -159,20 +90,9 @@ impl Accounts {
             .iter()
             .map(|account| account.id)
             .max()
-            .and_then(AccountId::checked_add)
+            .and_then(|id| id.checked_add(1))
             .unwrap_or(AccountId::MAX);
         self.next_id = self.next_id.max(min_next).max(FIRST_DYNAMIC_ACCOUNT_ID);
-    }
-
-    fn next_available_id(&self) -> Result<AccountId, AccountError> {
-        let mut candidate = self.next_id.max(FIRST_DYNAMIC_ACCOUNT_ID);
-
-        loop {
-            if self.get(candidate).is_none() {
-                return Ok(candidate);
-            }
-            candidate = candidate.checked_add(1).ok_or(AccountError::IdExhausted)?;
-        }
     }
 }
 
@@ -188,72 +108,38 @@ mod tests {
     fn default_is_legacy_account_one() {
         let accounts = Accounts::default();
         assert_eq!(accounts.items.len(), 1);
+        assert_eq!(accounts.items[0].id, PRIMARY_ACCOUNT_ID);
+        assert_eq!(accounts.items[0].name, "Account 1");
         assert_eq!(accounts.active_id, PRIMARY_ACCOUNT_ID);
         assert_eq!(accounts.next_id, 2);
-        assert_eq!(accounts.active().name, "Account 1");
-        assert!(accounts.active().uses_legacy_storage());
     }
 
     #[test]
-    fn added_accounts_use_new_ids_and_trim_names() {
-        let mut accounts = Accounts::default();
-        let work = accounts.add("  Work  ").unwrap();
-        let personal = accounts.add("Personal").unwrap();
-
-        assert_eq!(work.id, 2);
-        assert_eq!(work.name, "Work");
-        assert_eq!(personal.id, 3);
-        assert_eq!(accounts.active_id, 3);
-        assert_eq!(accounts.next_id, 4);
-        assert!(!work.uses_legacy_storage());
+    fn account_names_are_normalized() {
+        let mut accounts = Accounts {
+            items: vec![Account {
+                id: 2,
+                name: "  Work  ".into(),
+            }],
+            active_id: 2,
+            next_id: 3,
+        };
+        accounts.normalize();
+        assert_eq!(accounts.items[0].name, "Work");
     }
 
     #[test]
     fn blank_names_fall_back_to_account_id() {
-        let mut accounts = Accounts::default();
-        let account = accounts.add("   ").unwrap();
-        assert_eq!(account.name, "Account 2");
-
-        accounts.rename(2, " ").unwrap();
-        assert_eq!(accounts.get(2).unwrap().name, "Account 2");
-    }
-
-    #[test]
-    fn deleting_does_not_reuse_ids() {
-        let mut accounts = Accounts::default();
-        accounts.add("Work").unwrap();
-        accounts.add("Personal").unwrap();
-        accounts.remove(2).unwrap();
-
-        let replacement = accounts.add("Other").unwrap();
-        assert_eq!(replacement.id, 4);
-    }
-
-    #[test]
-    fn removing_active_selects_remaining_account() {
-        let mut accounts = Accounts::default();
-        accounts.add("Work").unwrap();
-        assert_eq!(accounts.active_id, 2);
-
-        accounts.remove(2).unwrap();
-        assert_eq!(accounts.active_id, 1);
-    }
-
-    #[test]
-    fn cannot_remove_last_account() {
-        let mut accounts = Accounts::default();
-        assert_eq!(
-            accounts.remove(PRIMARY_ACCOUNT_ID),
-            Err(AccountError::LastAccount)
-        );
-    }
-
-    #[test]
-    fn unknown_account_operations_fail() {
-        let mut accounts = Accounts::default();
-        assert_eq!(accounts.set_active(99), Err(AccountError::NotFound));
-        assert_eq!(accounts.rename(99, "Nope"), Err(AccountError::NotFound));
-        assert_eq!(accounts.remove(99), Err(AccountError::LastAccount));
+        let mut accounts = Accounts {
+            items: vec![Account {
+                id: 2,
+                name: "   ".into(),
+            }],
+            active_id: 2,
+            next_id: 3,
+        };
+        accounts.normalize();
+        assert_eq!(accounts.items[0].name, "Account 2");
     }
 
     #[test]
@@ -271,10 +157,22 @@ mod tests {
     fn normalize_drops_invalid_and_duplicate_ids() {
         let mut accounts = Accounts {
             items: vec![
-                Account::new(0, "Invalid"),
-                Account::new(2, "Work"),
-                Account::new(2, "Duplicate"),
-                Account::new(5, "  Personal  "),
+                Account {
+                    id: 0,
+                    name: "Invalid".into(),
+                },
+                Account {
+                    id: 2,
+                    name: "Work".into(),
+                },
+                Account {
+                    id: 2,
+                    name: "Duplicate".into(),
+                },
+                Account {
+                    id: 5,
+                    name: "  Personal  ".into(),
+                },
             ],
             active_id: 99,
             next_id: 2,
@@ -298,5 +196,16 @@ mod tests {
         };
         accounts.normalize();
         assert_eq!(accounts.next_id, 50);
+    }
+
+    #[test]
+    fn normalize_handles_maximum_id_without_wrapping() {
+        let mut accounts = Accounts {
+            items: vec![Account::new(AccountId::MAX, "Last")],
+            active_id: AccountId::MAX,
+            next_id: 2,
+        };
+        accounts.normalize();
+        assert_eq!(accounts.next_id, AccountId::MAX);
     }
 }
