@@ -2,8 +2,8 @@
 //!
 //! Each script lives in its own `web/*.js` file (compiled in with `include_str!`)
 //! so the page logic stays real, lintable JavaScript instead of giant Rust
-//! string literals. They are registered as initialization scripts on the main
-//! window in `main.rs`, in the order below, after [`bootstrap`].
+//! string literals. They are registered as initialization scripts on the WhatsApp
+//! account windows in `window.rs`, in the order below, after [`bootstrap`].
 
 /// Clips the page into a rounded shape so the (transparent) OS window shows
 /// rounded corners. Must run before the in-page titlebar so its `html`
@@ -62,14 +62,20 @@ pub const WIPE_SESSION: &str = include_str!("web/wipe-session.js");
 /// WebKit process memory footprint.
 pub const DISABLE_MEDIA: &str = include_str!("web/disable-media.js");
 
-/// The first script to run: seeds `window.__ZW` with the config the other
-/// scripts read, and primes WhatsApp's persisted theme before the page boots.
+/// The first script to run: seeds `window.__ZW` with global settings plus the
+/// stable account identity the other scripts can attach to their events.
 pub fn bootstrap(
     wa_theme: &str,
     auto_lock_minutes: u32,
     has_password: bool,
     spellcheck: bool,
+    account_id: u32,
+    account_name: &str,
+    is_active_account: bool,
 ) -> String {
+    let account_name =
+        serde_json::to_string(account_name).expect("account name is always JSON serializable");
+
     include_str!("web/bootstrap.js")
         .replace("\"__ZW_THEME__\"", &format!("{wa_theme:?}"))
         .replace(
@@ -78,6 +84,12 @@ pub fn bootstrap(
         )
         .replace("\"__ZW_HAS_PASSWORD__\"", &has_password.to_string())
         .replace("\"__ZW_SPELLCHECK__\"", &spellcheck.to_string())
+        .replace("\"__ZW_ACCOUNT_ID__\"", &account_id.to_string())
+        .replace("\"__ZW_ACCOUNT_NAME__\"", &account_name)
+        .replace(
+            "\"__ZW_IS_ACTIVE_ACCOUNT__\"",
+            &is_active_account.to_string(),
+        )
 }
 
 /// Forces `spellcheck=true` on WhatsApp's composer when enabled.
@@ -90,36 +102,50 @@ pub const UPDATE_BANNER: &str = include_str!("web/update-banner.js");
 mod tests {
     use super::*;
 
+    fn sample_bootstrap() -> String {
+        bootstrap("dark", 15, true, true, 2, "Work", true)
+    }
+
     #[test]
     fn bootstrap_substitutes_theme() {
-        let script = bootstrap("dark", 0, false, true);
+        let script = sample_bootstrap();
         assert!(script.contains("\"dark\""));
         assert!(!script.contains("__ZW_THEME__"));
     }
 
     #[test]
     fn bootstrap_substitutes_auto_lock_minutes() {
-        let script = bootstrap("system", 15, false, true);
+        let script = sample_bootstrap();
         assert!(script.contains("15"));
         assert!(!script.contains("__ZW_AUTO_LOCK_MINUTES__"));
     }
 
     #[test]
     fn bootstrap_substitutes_has_password() {
-        let script = bootstrap("system", 0, true, true);
+        let script = sample_bootstrap();
         assert!(script.contains("true"));
         assert!(!script.contains("__ZW_HAS_PASSWORD__"));
     }
 
     #[test]
     fn bootstrap_substitutes_spellcheck() {
-        let script = bootstrap("system", 0, false, false);
+        let script = bootstrap("system", 0, false, false, 1, "Personal", false);
         assert!(!script.contains("__ZW_SPELLCHECK__"));
     }
 
     #[test]
+    fn bootstrap_substitutes_account_identity() {
+        let script = bootstrap("system", 0, false, true, 7, "Work \"QA\"", false);
+        assert!(script.contains("accountId: 7"));
+        assert!(script.contains("accountName: \"Work \\\"QA\\\"\""));
+        assert!(script.contains("isActiveAccount: false"));
+        assert!(!script.contains("__ZW_ACCOUNT_"));
+        assert!(!script.contains("__ZW_IS_ACTIVE_ACCOUNT__"));
+    }
+
+    #[test]
     fn bootstrap_no_placeholders_remain() {
-        let script = bootstrap("light", 5, true, false);
+        let script = sample_bootstrap();
         assert!(!script.contains("__ZW_"));
     }
 
