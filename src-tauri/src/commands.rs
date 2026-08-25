@@ -64,6 +64,16 @@ pub fn add_account(app: tauri::AppHandle, name: String) -> Result<Accounts, Stri
         return Err(format!("failed to create account window: {e}"));
     }
 
+    // The WebView did not exist when Settings last applied spell-check. Re-run
+    // the shared setting now, then publish the new account list to every live
+    // titlebar so existing windows learn about the addition immediately.
+    window::apply_spellcheck(
+        &app,
+        cfg.spellcheck_enabled,
+        cfg.spellcheck_languages.clone(),
+    );
+    window::sync_account_metadata(&app, &cfg.accounts);
+
     Ok(cfg.accounts)
 }
 
@@ -77,9 +87,9 @@ pub fn switch_account(app: tauri::AppHandle, account_id: AccountId) -> Result<Ac
     Ok(Config::load(&config_path(&app)).accounts)
 }
 
-/// Renames account metadata without touching its WhatsApp profile. The live page
-/// receives the new display name immediately; the persisted value is authoritative
-/// and will be injected again the next time the WebView is constructed.
+/// Renames account metadata without touching its WhatsApp profile. Live account
+/// pages receive the authoritative collection so titlebars and switchers update
+/// without requiring a reload.
 #[tauri::command]
 pub fn rename_account(
     app: tauri::AppHandle,
@@ -92,17 +102,7 @@ pub fn rename_account(
     cfg.save(&path)
         .map_err(|e| format!("failed to save account: {e}"))?;
 
-    if let Some(account) = cfg.accounts.get(account_id) {
-        let label = window::account_label(account_id);
-        if let Some(webview) = app.get_webview_window(&label) {
-            let name = serde_json::to_string(&account.name)
-                .expect("account name is always JSON serializable");
-            let _ = webview.eval(format!(
-                "if (window.__ZW) window.__ZW.accountName = {name};"
-            ));
-        }
-    }
-
+    window::sync_account_metadata(&app, &cfg.accounts);
     Ok(cfg.accounts)
 }
 
