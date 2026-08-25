@@ -1,11 +1,12 @@
 //! The thin IPC layer: every `#[tauri::command]` invokable from the local React
-//! windows (Settings / About / Shortcuts / Lock). Each delegates to a domain
-//! module (config / lock / window / password). App commands can NOT be invoked
-//! from the remote WhatsApp page, so that page talks to the backend via events
-//! instead (see `register_web_events` in main.rs).
+//! windows (Settings / About / Shortcuts / Lock / Accounts). Each delegates to a
+//! domain module (config / accounts / lock / window / password). App commands can
+//! NOT be invoked from the remote WhatsApp page, so that page talks to the
+//! backend via events instead (see `register_web_events` in main.rs).
 
 use tauri::Manager;
 
+use crate::accounts::{AccountError, AccountId, Accounts};
 use crate::config::{config_path, Config, ConfigPatch, ConfigView, Theme};
 use crate::{lock, password, scripts, window};
 
@@ -31,6 +32,88 @@ pub fn save_config(app: tauri::AppHandle, patch: ConfigPatch) {
     );
 }
 
+/// Returns account metadata to the local management UI. `next_id` is included
+/// because [`Accounts`] is the persisted domain type, but the frontend treats it
+/// as opaque and never writes account state back through `save_config`.
+#[tauri::command]
+pub fn get_accounts(app: tauri::AppHandle) -> Accounts {
+    Config::load(&config_path(&app)).accounts
+}
+
+/// Adds a new isolated WhatsApp session and makes it active. Config is persisted
+/// before WebView creation so the remote page's early readiness event validates;
+/// if window creation fails, metadata is rolled back to the previous account.
+#[tauri::command]
+pub fn add_account(app: tauri::AppHandle, name: String) -> Result<Accounts, String> {
+    let path = config_path(&app);
+    let mut cfg = Config::load(&path);
+    let previous_active = cfg.accounts.active_id;
+    let account = cfg.accounts.add(name).map_err(account_error)?;
+
+    cfg.save(&path)
+        .map_err(|e| format!("failed to save account: {e}"))?;
+
+    window::hide_all_accounts(&app);
+    if let Err(e) = window::build_account(&app, &cfg, &account) {
+        // Restore metadata first; the previous account can then safely become
+        // visible again without leaving a broken active id in config.
+        let _ = cfg.accounts.remove(account.id);
+        let _ = cfg.accounts.set_active(previous_active);
+        let _ = cfg.save(&path);
+        window::show_account(&app, previous_active);
+        return Err(format!("failed to create account window: {e}"));
+    }
+
+    Ok(cfg.accounts)
+}
+
+/// Switches presentation to an already-loaded account. Background WebViews stay
+/// alive for notifications/unread updates; only one account window is visible.
+#[tauri::command]
+pub fn switch_account(app: tauri::AppHandle, account_id: AccountId) -> Result<Accounts, String> {
+    if !window::show_account(&app, account_id) {
+        return Err("account not found or could not be shown".to_string());
+    }
+    Ok(Config::load(&config_path(&app)).accounts)
+}
+
+/// Renames account metadata without touching its WhatsApp profile. The live page
+/// receives the new display name immediately; the persisted value is authoritative
+/// and will be injected again the next time the WebView is constructed.
+#[tauri::command]
+pub fn rename_account(
+    app: tauri::AppHandle,
+    account_id: AccountId,
+    name: String,
+) -> Result<Accounts, String> {
+    let path = config_path(&app);
+    let mut cfg = Config::load(&path);
+    cfg.accounts.rename(account_id, name).map_err(account_error)?;
+    cfg.save(&path)
+        .map_err(|e| format!("failed to save account: {e}"))?;
+
+    if let Some(account) = cfg.accounts.get(account_id) {
+        let label = window::account_label(account_id);
+        if let Some(webview) = app.get_webview_window(&label) {
+            let name = serde_json::to_string(&account.name)
+                .expect("account name is always JSON serializable");
+            let _ = webview.eval(format!(
+                "if (window.__ZW) window.__ZW.accountName = {name};"
+            ));
+        }
+    }
+
+    Ok(cfg.accounts)
+}
+
+fn account_error(error: AccountError) -> String {
+    match error {
+        AccountError::NotFound => "account not found".to_string(),
+        AccountError::LastAccount => "the last account cannot be removed".to_string(),
+        AccountError::IdExhausted => "no account ids remain available".to_string(),
+    }
+}
+
 /// Sets (or replaces) the app-lock password. Replacing an existing password
 /// requires proving ownership — `current` must verify against the stored hash,
 /// otherwise the change is refused. Setting a password for the first time (no
@@ -44,9 +127,6 @@ pub fn set_password(app: tauri::AppHandle, plain: String, current: Option<String
         return false;
     }
 
-    // Guard replacement: an existing password can only be overwritten by someone
-    // who knows it (removing it goes through `remove_password`, which also allows
-    // an admin override).
     if let Some(existing) = &cfg.password_hash {
         let ok = current
             .as_deref()
@@ -61,7 +141,6 @@ pub fn set_password(app: tauri::AppHandle, plain: String, current: Option<String
     let _ = cfg.save(&path);
     lock::apply_auto_lock(&app);
 
-    // Reflect the new password state in the tray menu and the injected titlebar.
     crate::tray::refresh(&app);
     window::sync_has_password(&app, cfg.password_hash.is_some());
     true
@@ -77,7 +156,7 @@ pub fn remove_password(app: tauri::AppHandle, current: Option<String>) -> bool {
     let mut cfg = Config::load(&path);
 
     let Some(existing) = &cfg.password_hash else {
-        return true; // Nothing to remove.
+        return true;
     };
 
     let by_password = current
@@ -113,20 +192,25 @@ pub fn reset_password(app: tauri::AppHandle) -> bool {
 }
 
 /// Non-Linux "forgot password" recovery. There's no cross-platform system-auth
-/// reset (polkit is Linux-only), so we remove the lock by wiping everything: the
-/// config (password included) is deleted and the WhatsApp session is logged out,
-/// so a thief can't keep the session either. The user re-pairs from the QR code.
+/// reset (polkit is Linux-only), so remove the lock by wiping every linked
+/// WhatsApp session plus the config. Each already-created account WebView clears
+/// its own isolated storage through the same page-side wipe script.
 #[tauri::command]
 pub fn forget_password_wipe(app: tauri::AppHandle) {
-    let _ = std::fs::remove_file(config_path(&app));
+    let cfg = Config::load(&config_path(&app));
 
-    if let Some(main) = app.get_webview_window(window::MAIN_LABEL) {
-        let _ = main.eval(scripts::WIPE_SESSION);
+    for account in &cfg.accounts.items {
+        let label = window::account_label(account.id);
+        if let Some(webview) = app.get_webview_window(&label) {
+            let _ = webview.eval(scripts::WIPE_SESSION);
+        }
     }
 
+    let _ = std::fs::remove_file(config_path(&app));
+
     // The config (and its password) is gone, so an empty unlock now succeeds and
-    // reveals the main window. The page reload from WIPE_SESSION re-seeds
-    // `window.__ZW.hasPassword`; the tray needs an explicit refresh.
+    // reveals legacy Account 1. The tray needs an explicit refresh because its
+    // conditional Lock item is built from config rather than page state.
     crate::tray::refresh(&app);
     lock::unlock(&app, "");
 }
