@@ -1,5 +1,5 @@
 // IPC layer: typed bindings to the Rust commands. These are only callable from
-// the local React windows (the remote WhatsApp window talks to Rust via events).
+// the local React windows (the remote WhatsApp windows talk to Rust via events).
 import { invoke } from "@tauri-apps/api/core";
 
 export type Theme = "system" | "light" | "dark";
@@ -28,8 +28,28 @@ export interface ConfigView {
 
 export type ConfigPatch = Omit<ConfigView, "has_password">;
 
+export interface Account {
+  id: number;
+  name: string;
+}
+
+/** Persisted account state returned by Rust. `next_id` is backend-owned. */
+export interface AccountsState {
+  items: Account[];
+  active_id: number;
+  next_id: number;
+}
+
 export const getConfig = () => invoke<ConfigView>("get_config");
 export const saveConfig = (patch: ConfigPatch) => invoke("save_config", { patch });
+
+export const getAccounts = () => invoke<AccountsState>("get_accounts");
+export const addAccount = (name: string) => invoke<AccountsState>("add_account", { name });
+export const switchAccount = (accountId: number) =>
+  invoke<AccountsState>("switch_account", { accountId });
+export const renameAccount = (accountId: number, name: string) =>
+  invoke<AccountsState>("rename_account", { accountId, name });
+
 /**
  * Sets or replaces the app-lock password. Replacing an existing one requires
  * `current` (the current password) to verify; first-time set needs no `current`.
