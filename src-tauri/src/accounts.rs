@@ -79,6 +79,7 @@ pub enum AccountError {
 }
 
 impl Accounts {
+    #[cfg(test)]
     pub fn active(&self) -> &Account {
         self.items
             .iter()
