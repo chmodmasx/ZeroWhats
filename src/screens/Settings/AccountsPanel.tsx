@@ -29,7 +29,9 @@ export default function AccountsPanel() {
   };
 
   useEffect(() => {
-    getAccounts().then(sync).catch((e) => setError(String(e)));
+    getAccounts()
+      .then(sync)
+      .catch((e) => setError(String(e)));
   }, []);
 
   const run = async (operation: () => Promise<AccountsState>) => {
@@ -99,7 +101,11 @@ export default function AccountsPanel() {
           const primary = account.id === PRIMARY_ACCOUNT_ID;
 
           return (
-            <Row key={account.id} title={account.name} subtitle={primary ? t.primaryAccountHint : undefined}>
+            <Row
+              key={account.id}
+              title={account.name}
+              subtitle={primary ? t.primaryAccountHint : undefined}
+            >
               <div className={styles.accountActions}>
                 {active && <span className={styles.activePill}>{t.activeAccount}</span>}
                 <input
