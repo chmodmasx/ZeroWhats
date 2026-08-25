@@ -1,5 +1,14 @@
 import { useEffect, useState } from "react";
-import { Account, AccountsState, addAccount, getAccounts, renameAccount, switchAccount } from "../../lib/api";
+import { ask } from "@tauri-apps/plugin-dialog";
+import {
+  Account,
+  AccountsState,
+  addAccount,
+  getAccounts,
+  removeAccount,
+  renameAccount,
+  switchAccount,
+} from "../../lib/api";
 import { t } from "../../lib/translations";
 import { cx } from "../../lib/cx";
 import { Group, Row, ui } from "../../ui/components";
@@ -49,6 +58,15 @@ export default function AccountsPanel() {
     void run(() => renameAccount(account.id, name));
   };
 
+  const remove = async (account: Account) => {
+    const confirmed = await ask(t.removeAccountConfirm, {
+      title: `${t.removeAccount}: ${account.name}`,
+      kind: "warning",
+      okLabel: t.removeAccount,
+    });
+    if (confirmed) void run(() => removeAccount(account.id));
+  };
+
   if (!accounts) {
     return <div className={styles.accountsStatus}>{error || t.checking}</div>;
   }
@@ -78,13 +96,10 @@ export default function AccountsPanel() {
           const active = account.id === accounts.active_id;
           const draft = drafts[account.id] ?? account.name;
           const changed = draft.trim() !== account.name;
+          const primary = account.id === PRIMARY_ACCOUNT_ID;
 
           return (
-            <Row
-              key={account.id}
-              title={account.name}
-              subtitle={account.id === PRIMARY_ACCOUNT_ID ? t.primaryAccountHint : undefined}
-            >
+            <Row key={account.id} title={account.name} subtitle={primary ? t.primaryAccountHint : undefined}>
               <div className={styles.accountActions}>
                 {active && <span className={styles.activePill}>{t.activeAccount}</span>}
                 <input
@@ -107,6 +122,15 @@ export default function AccountsPanel() {
                     onClick={() => void run(() => switchAccount(account.id))}
                   >
                     {t.switchAccount}
+                  </button>
+                )}
+                {!primary && (
+                  <button
+                    className={cx(ui.btn, ui.danger)}
+                    disabled={busy}
+                    onClick={() => void remove(account)}
+                  >
+                    {t.removeAccount}
                   </button>
                 )}
               </div>
