@@ -62,6 +62,10 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::save_config,
+            commands::get_accounts,
+            commands::add_account,
+            commands::switch_account,
+            commands::rename_account,
             commands::set_password,
             commands::remove_password,
             commands::reset_password,
