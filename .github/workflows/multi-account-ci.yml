@@ -71,3 +71,48 @@ jobs:
       - name: Clippy
         working-directory: src-tauri
         run: cargo clippy -- -D warnings
+
+  linux-test-build:
+    needs: [frontend, rust]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            xdg-utils
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build DEB test package
+        run: bun run app:build -- --bundles deb
+
+      - name: Upload Linux test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: zerowhats-multi-account-linux-x86_64
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/zerowhats
+          if-no-files-found: error
+          retention-days: 7
