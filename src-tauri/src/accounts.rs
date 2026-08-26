@@ -79,13 +79,6 @@ pub enum AccountError {
 }
 
 impl Accounts {
-    pub fn active(&self) -> &Account {
-        self.items
-            .iter()
-            .find(|account| account.id == self.active_id)
-            .unwrap_or_else(|| self.items.first().expect("accounts are normalized"))
-    }
-
     pub fn get(&self, id: AccountId) -> Option<&Account> {
         self.items.iter().find(|account| account.id == id)
     }
@@ -196,7 +189,7 @@ mod tests {
         assert_eq!(accounts.items[0].name, "Account 1");
         assert_eq!(accounts.active_id, PRIMARY_ACCOUNT_ID);
         assert_eq!(accounts.next_id, 2);
-        assert!(accounts.active().uses_legacy_storage());
+        assert!(accounts.items[0].uses_legacy_storage());
     }
 
     #[test]
