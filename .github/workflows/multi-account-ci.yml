@@ -25,11 +25,8 @@ jobs:
       - name: Lint
         run: bun run lint
 
-      # Canonicalize the checked-out sources before build while the feature is
-      # still being brought to a clean baseline. A final format-only gate is
-      # restored once all formatter diffs are committed to the branch.
-      - name: Format
-        run: bunx oxfmt src
+      - name: Format check
+        run: bun run format:check
 
       - name: Build
         run: bun run build
@@ -59,9 +56,9 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
-      - name: Format
+      - name: Format check
         working-directory: src-tauri
-        run: cargo fmt
+        run: cargo fmt -- --check
 
       - name: Check
         working-directory: src-tauri
