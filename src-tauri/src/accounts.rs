@@ -83,6 +83,12 @@ impl Accounts {
         self.items.iter().find(|account| account.id == id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn active(&self) -> &Account {
+        self.get(self.active_id)
+            .expect("active account must exist after normalization")
+    }
+
     pub fn add(&mut self, name: impl Into<String>) -> Result<Account, AccountError> {
         let id = self.next_available_id()?;
         let account = Account::new(id, name);
