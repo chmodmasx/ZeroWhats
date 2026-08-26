@@ -172,12 +172,7 @@ fn app_icon_image() -> Option<notify_rust::Image> {
     const ICON_PNG: &[u8] = include_bytes!("../icons/128x128.png");
 
     let img = tauri::image::Image::from_bytes(ICON_PNG).ok()?;
-    notify_rust::Image::from_rgba(
-        img.width() as i32,
-        img.height() as i32,
-        img.rgba().to_vec(),
-    )
-    .ok()
+    notify_rust::Image::from_rgba(img.width() as i32, img.height() as i32, img.rgba().to_vec()).ok()
 }
 
 /// The icon to attach to a notification on non-Linux platforms. Linux drives

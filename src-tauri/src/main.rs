@@ -366,9 +366,9 @@ fn register_web_events(app: &tauri::AppHandle) {
                 return;
             }
             let handle = handle.clone();
-            let _ = handle.clone().run_on_main_thread(move || {
-                reveal_account_if_active(&handle, payload.account_id)
-            });
+            let _ = handle
+                .clone()
+                .run_on_main_thread(move || reveal_account_if_active(&handle, payload.account_id));
         }
     });
 
@@ -386,7 +386,10 @@ fn register_web_events(app: &tauri::AppHandle) {
     app.listen("zw://account-switch", move |event| {
         if let Ok(payload) = serde_json::from_str::<AccountPayload>(event.payload()) {
             if !account_exists(&handle, payload.account_id) {
-                log::warn!("account switch to unknown id {} ignored", payload.account_id);
+                log::warn!(
+                    "account switch to unknown id {} ignored",
+                    payload.account_id
+                );
                 return;
             }
             let handle = handle.clone();
@@ -410,7 +413,10 @@ fn register_web_events(app: &tauri::AppHandle) {
     app.listen("zw://unread", move |event| {
         if let Ok(payload) = serde_json::from_str::<UnreadPayload>(event.payload()) {
             if !account_exists(&handle, payload.account_id) {
-                log::warn!("unread event from unknown account {} ignored", payload.account_id);
+                log::warn!(
+                    "unread event from unknown account {} ignored",
+                    payload.account_id
+                );
                 return;
             }
             let handle = handle.clone();
@@ -463,7 +469,10 @@ fn register_web_events(app: &tauri::AppHandle) {
     app.listen("zw://download", move |event| {
         if let Ok(mut payload) = serde_json::from_str::<DownloadPayload>(event.payload()) {
             if !account_exists(&handle, payload.account_id) {
-                log::warn!("download event from unknown account {} ignored", payload.account_id);
+                log::warn!(
+                    "download event from unknown account {} ignored",
+                    payload.account_id
+                );
                 return;
             }
 
@@ -475,13 +484,7 @@ fn register_web_events(app: &tauri::AppHandle) {
             const MAX_DOWNLOAD_B64: usize = 341_333_334; // ~256 MB decoded
             if payload.data.len() > MAX_DOWNLOAD_B64 {
                 log::warn!("blob download '{}' exceeds 256 MB limit", payload.name);
-                emit_download_result(
-                    &handle,
-                    payload.account_id,
-                    &payload.name,
-                    false,
-                    None,
-                );
+                emit_download_result(&handle, payload.account_id, &payload.name, false, None);
                 return;
             }
 
@@ -490,13 +493,7 @@ fn register_web_events(app: &tauri::AppHandle) {
                 Ok(b) => b,
                 Err(e) => {
                     log::warn!("failed to decode blob download '{}': {e}", payload.name);
-                    emit_download_result(
-                        &handle,
-                        payload.account_id,
-                        &payload.name,
-                        false,
-                        None,
-                    );
+                    emit_download_result(&handle, payload.account_id, &payload.name, false, None);
                     return;
                 }
             };
@@ -510,13 +507,7 @@ fn register_web_events(app: &tauri::AppHandle) {
                         (false, None)
                     }
                 };
-                emit_download_result(
-                    &handle,
-                    payload.account_id,
-                    &payload.name,
-                    ok,
-                    path,
-                );
+                emit_download_result(&handle, payload.account_id, &payload.name, ok, path);
             } else {
                 use tauri_plugin_dialog::DialogExt;
                 let account_id = payload.account_id;

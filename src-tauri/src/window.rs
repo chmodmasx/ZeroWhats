@@ -373,8 +373,8 @@ pub fn sync_account_metadata(app: &AppHandle, accounts: &Accounts) {
             continue;
         };
 
-        let name = serde_json::to_string(&account.name)
-            .expect("account name is always JSON serializable");
+        let name =
+            serde_json::to_string(&account.name).expect("account name is always JSON serializable");
         let active = accounts.active_id == account.id;
         let _ = window.eval(format!(
             "if (window.__ZW) {{ window.__ZW.accountName = {name}; window.__ZW.isActiveAccount = {active}; }}"
@@ -600,15 +600,27 @@ mod tests {
 
     #[test]
     fn invalid_account_labels_are_rejected() {
-        for label in ["account-0", "account-1", "account-", "account-x", "settings"] {
+        for label in [
+            "account-0",
+            "account-1",
+            "account-",
+            "account-x",
+            "settings",
+        ] {
             assert_eq!(account_id_from_label(label), None);
         }
     }
 
     #[test]
     fn data_store_ids_are_stable_and_distinct() {
-        assert_eq!(account_data_store_identifier(2), account_data_store_identifier(2));
-        assert_ne!(account_data_store_identifier(2), account_data_store_identifier(3));
+        assert_eq!(
+            account_data_store_identifier(2),
+            account_data_store_identifier(2)
+        );
+        assert_ne!(
+            account_data_store_identifier(2),
+            account_data_store_identifier(3)
+        );
     }
 
     #[test]

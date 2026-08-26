@@ -200,11 +200,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let mute = IconMenuItem::with_id(
         app,
         "mute",
-        if muted {
-            "Unmute"
-        } else {
-            "Mute"
-        },
+        if muted { "Unmute" } else { "Mute" },
         true,
         Some(menu_icon(if muted { &ICON_BELL_OFF } else { &ICON_BELL })),
         None::<&str>,
