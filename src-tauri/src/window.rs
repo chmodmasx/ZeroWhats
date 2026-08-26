@@ -199,16 +199,6 @@ pub fn build_accounts(app: &AppHandle, cfg: &Config) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Compatibility helper retained for call sites that still mean "the primary
-/// WhatsApp window".
-pub fn build_main(app: &AppHandle, cfg: &Config) -> tauri::Result<()> {
-    let account = cfg
-        .accounts
-        .get(PRIMARY_ACCOUNT_ID)
-        .unwrap_or_else(|| cfg.accounts.active());
-    build_account(app, cfg, account)
-}
-
 /// Builds one frameless WhatsApp window with an isolated browser profile when it
 /// is not the legacy Account 1.
 pub fn build_account(app: &AppHandle, cfg: &Config, account: &Account) -> tauri::Result<()> {
@@ -389,13 +379,6 @@ pub fn sync_has_password(app: &AppHandle, has_password: bool) {
             "if (window.__ZW) window.__ZW.hasPassword = {has_password};"
         ));
     });
-}
-
-/// Compatibility entry point retained for callers that mean the active account.
-pub fn apply_unfocus_blur(app: &AppHandle, focused: bool) {
-    let cfg = Config::load(&config_path(app));
-    let label = account_label(cfg.accounts.active_id);
-    apply_unfocus_blur_for_label(app, &label, focused);
 }
 
 /// Blurs or clears one account page when that account window changes focus.
