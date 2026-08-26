@@ -6,10 +6,12 @@
 //! the clipboard ourselves and pass the payload back to the page as base64 data
 //! URLs, which `clipboard-image.js` turns into a synthetic paste.
 //!
-//! Two clipboard shapes are handled:
-//!   * raw bitmap (a screenshot / "copy image") — via `arboard`;
+//! Three clipboard shapes are handled:
 //!   * one or more files (copied in the file manager) — advertised as a
-//!     `text/uri-list` of `file://` URIs, read via `wl-paste`/`xclip`.
+//!     `text/uri-list` of `file://` URIs, read via `wl-paste`/`xclip`;
+//!   * an image MIME offered by a native Wayland clipboard (for example a KDE
+//!     Spectacle screenshot) — read directly via `wl-paste` without converting;
+//!   * raw bitmap fallback ("copy image") — read via `arboard` and encoded PNG.
 
 use base64::Engine;
 use serde::Serialize;
@@ -35,7 +37,70 @@ pub fn read_clipboard_files() -> Vec<ClipFile> {
     if !files.is_empty() {
         return files;
     }
+
+    // KDE Spectacle and other native Wayland applications commonly expose an
+    // image MIME without a filesystem URI. `arboard`'s default Linux backend is
+    // X11/XWayland, so read the native Wayland offer directly before falling
+    // back to it.
+    if let Some(image) = read_wayland_image() {
+        return vec![image];
+    }
+
     read_bitmap().into_iter().collect()
+}
+
+/// Native Wayland image offer (for example a Spectacle screenshot). The bytes
+/// are kept exactly as offered by the clipboard instead of decoding/re-encoding
+/// them, which avoids both quality loss and an unnecessary RGBA allocation.
+fn read_wayland_image() -> Option<ClipFile> {
+    use std::process::Command;
+
+    std::env::var_os("WAYLAND_DISPLAY")?;
+
+    let listing = Command::new("wl-paste").arg("--list-types").output().ok()?;
+    if !listing.status.success() || listing.stdout.is_empty() {
+        return None;
+    }
+
+    let types = String::from_utf8_lossy(&listing.stdout);
+    let (mime, extension) = preferred_wayland_image_type(&types)?;
+    let output = Command::new("wl-paste")
+        .args(["-t", mime, "-n"])
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+
+    // Keep IPC bounded just like file clipboard payloads.
+    if output.stdout.len() > 64 * 1024 * 1024 {
+        return None;
+    }
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(output.stdout);
+    Some(ClipFile {
+        name: format!("pasted-image.{extension}"),
+        mime: mime.to_string(),
+        data_url: format!("data:{mime};base64,{b64}"),
+    })
+}
+
+/// Picks a browser-friendly image representation from the Wayland clipboard.
+/// PNG is preferred because screenshot tools generally provide it losslessly.
+fn preferred_wayland_image_type(types: &str) -> Option<(&'static str, &'static str)> {
+    const PREFERRED: [(&str, &str); 5] = [
+        ("image/png", "png"),
+        ("image/webp", "webp"),
+        ("image/jpeg", "jpg"),
+        ("image/gif", "gif"),
+        ("image/bmp", "bmp"),
+    ];
+
+    PREFERRED.into_iter().find(|(mime, _)| {
+        types
+            .lines()
+            .any(|offered| offered.trim().eq_ignore_ascii_case(mime))
+    })
 }
 
 /// Raw bitmap in the clipboard (screenshot / "copy image"), re-encoded to PNG.
@@ -164,6 +229,36 @@ fn mime_from_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Wayland image MIME preference ---
+
+    #[test]
+    fn wayland_image_prefers_png() {
+        assert_eq!(
+            preferred_wayland_image_type("text/plain\nimage/jpeg\nimage/png\n"),
+            Some(("image/png", "png"))
+        );
+    }
+
+    #[test]
+    fn wayland_image_accepts_common_fallbacks() {
+        assert_eq!(
+            preferred_wayland_image_type("image/webp\ntext/plain\n"),
+            Some(("image/webp", "webp"))
+        );
+        assert_eq!(
+            preferred_wayland_image_type("IMAGE/JPEG\n"),
+            Some(("image/jpeg", "jpg"))
+        );
+    }
+
+    #[test]
+    fn wayland_image_ignores_non_images() {
+        assert_eq!(
+            preferred_wayland_image_type("text/plain\ntext/uri-list\n"),
+            None
+        );
+    }
 
     // --- percent_decode ---
 
